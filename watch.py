@@ -18,6 +18,8 @@ import concurrent.futures
 import random
 import sys
 import time
+from collections import deque
+from dataclasses import asdict
 from typing import Optional
 
 import pygame
@@ -26,11 +28,17 @@ import constants as C
 import leads
 from agents import AgentState, spawn_agents
 from decide import Intent, generate_candidates
+from export_narrative import describe
 from layout import compute_layout
-from render import draw_agents, draw_hud, draw_legend, draw_player_moves, draw_world
+from render import (BOTTOM_MARGIN, CRAFT_EFFECT_DURATION, DEATH_EFFECT_DURATION, SIDE_MARGIN,
+                     TRADE_EFFECT_DURATION, Effect, draw_agents, draw_effects, draw_event_ticker,
+                     draw_hud, draw_legend, draw_player_moves, draw_sparkline, draw_world,
+                     is_effect_expired)
 from stats import StatsTracker
 from tick import run_tick
 from world import RAW_RESOURCES, World, generate_world
+
+EVENT_LOG_MAXLEN = 8
 
 SCREEN_SIZE = (1300, 950)
 DEFAULT_TPS = 6.0
@@ -39,6 +47,23 @@ MAX_TPS = 60.0
 SMOOTHING_RATE = 8.0  # higher = snappier catch-up to the target node position
 TUNE_STEP = 0.10       # +/- 10% per keypress
 NUM_LEADS = 2
+STATS_WINDOW_TICKS = 100  # cadence for resetting stats.py's windowed counters (trade
+                           # volume, top routes) so the HUD reflects recent activity
+
+# TRADE and CRAFT are, verified directly against real post-fix data, the two most
+# common successful actions in the simulation (roughly 1-in-4 and 1-in-5 of all
+# successful actions) - flashing an effect for every single one would be visual
+# noise, not signal. Sampled down to a lively-but-readable rate instead. DEATH is
+# rare and always meaningful, so it's never sampled. MAX_ACTIVE_EFFECTS is a hard
+# cap safety net against pathological bursts regardless of the sample rate.
+TRADE_EFFECT_SAMPLE_RATE = 0.15
+CRAFT_EFFECT_SAMPLE_RATE = 0.15
+MAX_ACTIVE_EFFECTS = 150
+
+SPARKLINE_HISTORY_LEN = 60  # at the STATS_WINDOW_TICKS=100 sampling cadence, 60 samples
+                            # is the most recent 6000 ticks - covers a full typical run
+POPULATION_SPARKLINE_COLOR = (120, 220, 140)
+SPECIALIZATION_SPARKLINE_COLOR = (190, 150, 230)
 
 # A curated subset of constants.py worth adjusting live — not all ~35 constants
 # change anything you'd notice on screen. Transient only: these edits affect this
@@ -118,6 +143,11 @@ def spawn_player(world: World, rng: random.Random) -> AgentState:
 def main() -> int:
     args = parse_args()
     rng = random.Random(args.seed)
+    # Separate, unseeded RNG for purely cosmetic decisions (effect sampling below) -
+    # must never share the simulation's own rng, since consuming extra random()
+    # calls from it would silently shift every subsequent draw the simulation
+    # makes, breaking the determinism this project has specifically verified.
+    effect_rng = random.Random()
     world: World = generate_world(args.nodes, rng)
     crowd = spawn_agents(args.agents, world, rng)
     lead_agents = leads.spawn_leads(NUM_LEADS, world, rng)
@@ -141,6 +171,16 @@ def main() -> int:
     tick_accumulator = 0.0
     start_time = time.monotonic()
     tunable_index = 0
+
+    # stats.py's window counters (trade volume, top routes) accumulate forever
+    # unless reset periodically - snapshot + reset on a fixed tick cadence so the
+    # HUD reflects *recent* activity, not a running total since launch.
+    recent_trade_volume = 0.0
+    recent_route_traffic: dict = {}
+    effects: list[Effect] = []
+    event_log: deque = deque(maxlen=EVENT_LOG_MAXLEN)
+    population_history: deque = deque(maxlen=SPARKLINE_HISTORY_LEN)
+    specialization_history: deque = deque(maxlen=SPARKLINE_HISTORY_LEN)
 
     possessed = False
     player_pending_intent: Optional[Intent] = None
@@ -244,6 +284,43 @@ def main() -> int:
 
                 entries = run_tick(tick_counter, world, all_agents, rng, external_intents=external_intents)
                 stats.consume(entries)
+
+                # Trades, deaths, and crafts previously happened with zero visual
+                # signal - a death just made the dot vanish, a trade only moved a
+                # HUD number. Spawn a short-lived Effect for each so they read as
+                # events happening, not silent state changes.
+                now = time.monotonic()
+                for e in entries:
+                    if len(effects) >= MAX_ACTIVE_EFFECTS and e.action != "DEATH":
+                        continue  # hard cap - DEATH always gets through, it's rare and meaningful
+                    if (e.action == "TRADE" and e.success and e.target in render_pos and e.agent_id in render_pos
+                            and effect_rng.random() < TRADE_EFFECT_SAMPLE_RATE):
+                        effects.append(Effect(kind="trade", pos_a=render_pos[e.agent_id],
+                                               pos_b=render_pos[e.target], created_at=now,
+                                               duration=TRADE_EFFECT_DURATION))
+                    elif e.action == "DEATH" and e.agent_id in render_pos:
+                        effects.append(Effect(kind="death", pos_a=render_pos[e.agent_id],
+                                               created_at=now, duration=DEATH_EFFECT_DURATION))
+                    elif (e.action == "CRAFT" and e.success and e.agent_id in render_pos
+                            and effect_rng.random() < CRAFT_EFFECT_SAMPLE_RATE):
+                        effects.append(Effect(kind="craft", pos_a=render_pos[e.agent_id],
+                                               created_at=now, duration=CRAFT_EFFECT_DURATION))
+
+                    # Event ticker - same filter export_narrative.py uses (lead actions +
+                    # any death), reusing its describe() directly rather than duplicating
+                    # the templates. Markdown bold stripped since this renders on screen,
+                    # not to a markdown file.
+                    if e.action == "DEATH" or e.tier == "lead":
+                        text = describe(asdict(e))
+                        if text is not None:
+                            event_log.append(text.replace("**", ""))
+
+                if tick_counter % STATS_WINDOW_TICKS == 0:
+                    recent_trade_volume = stats.recent_trade_volume()
+                    recent_route_traffic = stats.route_traffic()
+                    population_history.append(sum(1 for a in all_agents if a.alive))
+                    specialization_history.append(stats.specialization_index(all_agents))
+                    stats.reset_window()
                 tick_accumulator -= step
 
         alpha = 1.0 - pow(2.718281828, -SMOOTHING_RATE * dt)
@@ -255,15 +332,27 @@ def main() -> int:
                 cur[1] + (target[1] - cur[1]) * alpha,
             )
 
+        render_now = time.monotonic()
+        effects = [e for e in effects if not is_effect_expired(e, render_now)]
+
         screen.fill((18, 18, 24))
-        draw_world(screen, world, layout, SCREEN_SIZE)
+        draw_world(screen, world, layout, SCREEN_SIZE, route_traffic=recent_route_traffic)
         draw_agents(screen, all_agents, render_pos, SCREEN_SIZE,
                     player_agent_id=player_agent.id, possessed=possessed)
+        draw_effects(screen, effects, SCREEN_SIZE, render_now)
         if possessed and player_agent.alive:
             player_move_targets = draw_player_moves(screen, font, world, player_agent.location, layout, SCREEN_SIZE)
         else:
             player_move_targets = []
         draw_legend(screen, font, SCREEN_SIZE)
+        draw_event_ticker(screen, font, list(event_log), SCREEN_SIZE)
+
+        spark_x = SCREEN_SIZE[0] - SIDE_MARGIN - 260
+        spark_y = SCREEN_SIZE[1] - BOTTOM_MARGIN - 130
+        spark_y = draw_sparkline(screen, font, list(population_history), (spark_x, spark_y),
+                                  "population (recent)", POPULATION_SPARKLINE_COLOR)
+        draw_sparkline(screen, font, list(specialization_history), (spark_x, spark_y),
+                        "specialization idx (recent)", SPECIALIZATION_SPARKLINE_COLOR, value_fmt="{:.2f}")
         population = sum(1 for a in all_agents if a.alive)
         tunable_name = TUNABLE_CONSTANTS[tunable_index]
         draw_hud(
@@ -271,6 +360,7 @@ def main() -> int:
             tick=tick_counter, population=population, total=len(all_agents),
             cumulative_trades=stats.cumulative_trades, cumulative_crafts=stats.cumulative_crafts,
             specialization_idx=stats.specialization_index(all_agents),
+            recent_trade_volume=recent_trade_volume, signals_active=stats.signals_active(world),
             paused=paused, ticks_per_second=ticks_per_second,
             tunable_name=tunable_name, tunable_value=getattr(C, tunable_name),
             possessed=possessed,

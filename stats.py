@@ -68,6 +68,39 @@ class StatsTracker:
     def cumulative_trades(self) -> int:
         return self._trade_leg_count // 2
 
+    def recent_top_routes(self, n: int = 3) -> list[tuple[tuple[str, str], int]]:
+        """Most-traveled routes since the last reset_window() call. Public
+        accessor over _window_routes rather than reaching into the private
+        attribute directly - same precedent as cumulative_trades."""
+        return self._window_routes.most_common(n)
+
+    def route_traffic(self) -> dict[tuple[str, str], int]:
+        """The full route->count map since the last reset, not just the top few -
+        for a heatmap that needs every edge's relative traffic, not a shortlist."""
+        return dict(self._window_routes)
+
+    def recent_top_gathers(self, n: int = 2) -> list[tuple[tuple[str, str], int]]:
+        return self._window_gathers.most_common(n)
+
+    def recent_trade_volume(self) -> float:
+        return self._window_trade_leg_volume / 2.0
+
+    def signals_active(self, world: World) -> int:
+        return sum(len(n.signals) for n in world.nodes.values())
+
+    def reset_window(self) -> None:
+        """Starts a fresh 'recent activity' window. snapshot() (run.py's
+        periodic printout) already did this inline; watch.py never called it
+        at all, so its window counters accumulated for the entire session
+        instead of reflecting recent activity - callers that want a rolling
+        'recent' view (not just cumulative-since-launch) need to call this
+        periodically themselves."""
+        self._window_trade_leg_count = 0
+        self._window_trade_leg_volume = 0.0
+        self._window_crafts = 0
+        self._window_routes.clear()
+        self._window_gathers.clear()
+
     def specialization_index(self, agents: list[AgentState]) -> float:
         alive = [a for a in agents if a.alive]
         fractions = []
@@ -89,7 +122,7 @@ class StatsTracker:
             r.value: (sum(a.held(r) for a in alive) / population if population else 0.0)
             for r in RAW_RESOURCES
         }
-        signals_active = sum(len(n.signals) for n in world.nodes.values())
+        signals_active = self.signals_active(world)
         spec_idx = self.specialization_index(agents)
 
         trades_window = self._window_trade_leg_count // 2
@@ -125,11 +158,7 @@ class StatsTracker:
             ])
             self._csv_file.flush()
 
-        self._window_trade_leg_count = 0
-        self._window_trade_leg_volume = 0.0
-        self._window_crafts = 0
-        self._window_routes.clear()
-        self._window_gathers.clear()
+        self.reset_window()
 
     def close(self) -> None:
         if self._csv_file:
