@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,6 +56,26 @@ def _parse_choice(response: Optional[str], n: int) -> Optional[int]:
             if 1 <= choice <= n:
                 return choice - 1
     return None
+
+
+class DecisionLog:
+    """Thread-safe append-only JSONL of every decision/summary attempt - what
+    was asked, whether the model answered usefully, what got posted. This is
+    debug/analysis data, not something the sim depends on; safe to omit
+    (pass log_path=None) with zero behavior change elsewhere."""
+
+    def __init__(self, path: Optional[str]):
+        self._lock = threading.Lock()
+        self._file = open(path, "a") if path else None
+
+    def record(self, **fields) -> None:
+        if self._file is None:
+            return
+        fields["ts"] = time.time()
+        line = json.dumps(fields)
+        with self._lock:
+            self._file.write(line + "\n")
+            self._file.flush()
 
 
 class ServiceClient:
@@ -126,7 +147,7 @@ def build_memory_prompt(lead: dict) -> str:
     )
 
 
-def decide_for_lead(client: ServiceClient, lead_id: str, model: str) -> None:
+def decide_for_lead(client: ServiceClient, lead_id: str, model: str, log: DecisionLog) -> None:
     leads = {l["id"]: l for l in client.get_leads()}
     lead = leads.get(lead_id)
     if lead is None or not lead["alive"]:
@@ -141,20 +162,30 @@ def decide_for_lead(client: ServiceClient, lead_id: str, model: str) -> None:
         # Model failed to answer usefully in time - post nothing. The lead
         # just runs on the Rust service's own crowd-style autopilot this
         # tick, exactly the same fallback guarantee v1 made.
+        log.record(kind="decision", lead_id=lead_id, llm_answered=False,
+                   raw_response=response, num_candidates=len(candidates))
         return
-    client.post_intent(lead_id, candidates[choice_index]["intent"])
+    chosen = candidates[choice_index]
+    client.post_intent(lead_id, chosen["intent"])
+    log.record(kind="decision", lead_id=lead_id, llm_answered=True,
+               chosen_action=chosen["intent"]["action"], chosen_description=chosen["description"],
+               num_candidates=len(candidates))
 
 
-def summarize_for_lead(client: ServiceClient, lead_id: str, model: str) -> None:
+def summarize_for_lead(client: ServiceClient, lead_id: str, model: str, log: DecisionLog) -> None:
     leads = {l["id"]: l for l in client.get_leads()}
     lead = leads.get(lead_id)
     if lead is None or not lead["alive"]:
         return
     response = query_ollama(build_memory_prompt(lead), model=model)
     if not response:
+        log.record(kind="memory", lead_id=lead_id, llm_answered=False)
         return
     summary = response.strip().splitlines()[0][:280]
     client.post_memory(lead_id, summary)
+    log.record(kind="memory", lead_id=lead_id, llm_answered=True, summary=summary,
+               trade_success_ratio=lead.get("trade_success_ratio"),
+               hunger_scares_witnessed=lead.get("hunger_scares_witnessed"))
 
 
 CROWD_NAMING_BATCH_SIZE = 10  # one Ollama call per batch, not per agent - cheap flavor, not per-agent cost
@@ -213,8 +244,10 @@ def main() -> None:
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--decision-interval", type=float, default=LEAD_DECISION_INTERVAL_SECONDS)
     p.add_argument("--memory-interval", type=float, default=MEMORY_SUMMARY_INTERVAL_SECONDS)
+    p.add_argument("--log-path", default=None, help="JSONL log of every decision/summary attempt (optional)")
     args = p.parse_args()
 
+    log = DecisionLog(args.log_path)
     client = ServiceClient(args.service)
     leads = client.get_leads()
     if not leads:
@@ -247,11 +280,11 @@ def main() -> None:
 
             for lid in lead_ids:
                 if now >= next_decision_due[lid] and lid not in decision_futures:
-                    decision_futures[lid] = executor.submit(decide_for_lead, client, lid, args.model)
+                    decision_futures[lid] = executor.submit(decide_for_lead, client, lid, args.model, log)
                     next_decision_due[lid] = now + args.decision_interval
 
                 if now >= next_memory_due[lid] and lid not in memory_futures:
-                    memory_futures[lid] = executor.submit(summarize_for_lead, client, lid, args.model)
+                    memory_futures[lid] = executor.submit(summarize_for_lead, client, lid, args.model, log)
                     next_memory_due[lid] = now + args.memory_interval
 
             time.sleep(0.5)

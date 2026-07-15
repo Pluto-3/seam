@@ -21,6 +21,7 @@ use tokio::sync::broadcast;
 
 use seam_core::agents::{spawn_leads, AgentState};
 use seam_core::decide::{generate_candidates, Intent};
+use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
 use seam_core::tick::run_tick;
 use seam_core::world::{generate_world, World};
@@ -32,10 +33,23 @@ struct Args {
     tick_ms: u64,
     port: u16,
     no_trade: bool,
+    log_path: Option<String>,
+    stats_csv: Option<String>,
+    stats_every_secs: u64,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { agents: 40, nodes: 15, seed: 42, tick_ms: 200, port: 7878, no_trade: false };
+    let mut a = Args {
+        agents: 40,
+        nodes: 15,
+        seed: 42,
+        tick_ms: 200,
+        port: 7878,
+        no_trade: false,
+        log_path: None,
+        stats_csv: None,
+        stats_every_secs: 30,
+    };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
     while i < argv.len() {
@@ -63,6 +77,18 @@ fn parse_args() -> Args {
             "--no-trade" => {
                 a.no_trade = true;
                 i += 1;
+            }
+            "--log-path" => {
+                a.log_path = Some(argv[i + 1].clone());
+                i += 2;
+            }
+            "--stats-csv" => {
+                a.stats_csv = Some(argv[i + 1].clone());
+                i += 2;
+            }
+            "--stats-every-secs" => {
+                a.stats_every_secs = argv[i + 1].parse().expect("--stats-every-secs must be an integer");
+                i += 2;
             }
             other => {
                 eprintln!("unknown arg: {other}");
@@ -97,6 +123,12 @@ struct SimState {
     // external_intents each tick - mirrors v1's "a lead with a fresh decision
     // waiting uses it for exactly one tick" semantics.
     pending_lead_intents: HashMap<String, Intent>,
+    // Lead-tier + DEATH entries only, never the crowd's own gather/move/rest
+    // noise - a long unattended run would otherwise burn disk fast for data
+    // nobody's actually going to read (see LOG.md).
+    log_writer: Option<JsonlWriter>,
+    stats_every_secs: u64,
+    last_stats_write: std::time::Instant,
 }
 
 struct AppState {
@@ -133,14 +165,33 @@ async fn main() {
     let world = generate_world(a.nodes, &mut rng);
     let mut agents = seam_core::agents::spawn_agents(a.agents, &world, &mut rng);
     agents.extend(spawn_leads(&world, &mut rng));
+
+    if let Some(path) = &a.log_path {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).expect("cannot create log directory");
+            }
+        }
+    }
+    if let Some(path) = &a.stats_csv {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).expect("cannot create stats directory");
+            }
+        }
+    }
+
     let sim = SimState {
         world,
         agents,
         rng,
         tick: 0,
-        stats: StatsTracker::new(None),
+        stats: StatsTracker::new(a.stats_csv.as_deref()),
         trade_enabled: !a.no_trade,
         pending_lead_intents: HashMap::new(),
+        log_writer: a.log_path.as_deref().map(JsonlWriter::new),
+        stats_every_secs: a.stats_every_secs,
+        last_stats_write: std::time::Instant::now(),
     };
 
     let (tx, _rx) = broadcast::channel(32);
@@ -160,6 +211,19 @@ async fn main() {
                     let due_intents = std::mem::take(&mut sim.pending_lead_intents);
                     let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
+
+                    if let Some(writer) = sim.log_writer.as_mut() {
+                        for e in &entries {
+                            if e.tier == "lead" || e.action == "DEATH" {
+                                writer.write(e);
+                            }
+                        }
+                    }
+                    if sim.last_stats_write.elapsed().as_secs() >= sim.stats_every_secs {
+                        sim.stats.snapshot(tick, &sim.agents, &sim.world, false);
+                        sim.last_stats_write = std::time::Instant::now();
+                    }
+
                     build_snapshot(sim, state.started_at)
                 };
                 let _ = state.tx.send(snap);
