@@ -4,13 +4,14 @@
 //! agent holds more of something.
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
 use crate::agents::AgentState;
 use crate::constants as C;
 use crate::world::{Node, ResourceType, World, RAW_RESOURCES};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Intent {
     pub action: String,
     pub target: Option<String>,
@@ -239,7 +240,14 @@ pub fn generate_candidates(
                         intent.give_amt = C::TRADE_UNIT_AMOUNT;
                         intent.want = Some(want.as_str().to_string());
                         intent.want_amt = C::TRADE_UNIT_AMOUNT;
-                        candidates.push((my_gain, intent));
+                        // Memory hook (Phase 2): a lead's accumulated caution discounts
+                        // how attractive a trade looks, without changing whether one is
+                        // legal at all - still a real, mutually-beneficial trade, just
+                        // less eagerly chosen. Zero for crowd agents, so no behavior
+                        // change there. Matters even when the LLM doesn't answer in
+                        // time, since this feeds the same argmax fallback everyone uses.
+                        let discounted = my_gain * (1.0 - agent.caution_bias.clamp(0.0, 0.9));
+                        candidates.push((discounted, intent));
                     }
                 }
             }

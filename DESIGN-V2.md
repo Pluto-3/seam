@@ -123,14 +123,26 @@ proves worth continuing, and each has a concrete pass/fail check, not just
   counter had advanced by 96 ticks (~600→~698) the entire time no one was
   watching - the literal "world keeps existing whether or not anyone's
   watching" claim, verified end-to-end, not assumed.
-- **Phase 2 — Leads: memory + visible identity.** Add the two-layer memory
-  (counters + periodic self-summary) and surface name/goal/personality in the
-  viewer for both leads and crowd (crowd's batched spawn-time identity).
-  **Proof:** run long enough for a lead to hit a real bad-trade streak or a
-  real hunger scare, and show its decision distribution measurably shifts
-  after the self-summary fires, compared to a run where it doesn't — the same
-  before/after comparison method already used to validate the crowd
-  mechanic in v1.
+- **Phase 2 — Leads: memory + visible identity. DONE, 2026-07-15.** Added
+  the two-layer memory: a mechanical `caution_bias` recomputed every tick
+  straight from free counters (trade success ratio, hunger scares witnessed)
+  - no LLM involved, so it shifts scoring even on ticks the model hasn't
+  answered on - plus an LLM-authored `memory_summary` fed into future prompts
+  and shown in the viewer alongside name/goal/personality for both leads and
+  crowd (crowd's batched spawn-time identity, via the new Python sidecar at
+  `sidecar/sidecar.py`). Splitting the mechanical number from the narrative
+  text (rather than asking one LLM call for both) was a refinement made
+  during the build, not planned upfront - see `LOG.md` for why. **Proof:**
+  live-verified against real Ollama first (real, distinct self-summaries,
+  a manual override posted and confirmed applied one tick later), then
+  proven properly with a controlled experiment - a `memory_enabled` toggle
+  isolates the mechanical layer from live-model timing, run across 15 seeds
+  x 2 conditions, 3 leads each. Found trade activity increases after a
+  hunger scare in both conditions, but measurably less with memory on
+  (+19.3 percentage points vs +22.2) - a real, modest, directionally
+  consistent effect attributable specifically to the memory mechanism, not
+  the larger effect originally expected. Reported at that size, not rounded
+  up - see `LOG.md`.
 - **Phase 3 — Hatch: steward.** Bind the player to a specific settlement,
   build the settlement health metric, wire up direct possession (ported from
   v1) and standing orders for the player. **Proof:** one playtest where a

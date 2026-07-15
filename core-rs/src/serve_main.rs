@@ -3,21 +3,24 @@
 //! connect over WebSocket for a live push feed, or hit /state once over
 //! REST, and can disconnect/reconnect without affecting the sim underneath.
 
+use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use seam_core::agents::AgentState;
+use seam_core::agents::{spawn_leads, AgentState};
+use seam_core::decide::{generate_candidates, Intent};
 use seam_core::stats::StatsTracker;
 use seam_core::tick::run_tick;
 use seam_core::world::{generate_world, World};
@@ -80,6 +83,7 @@ struct Snapshot {
     specialization_index: f64,
     trades_cumulative: u64,
     uptime_secs: u64,
+    leads: Vec<serde_json::Value>,
 }
 
 struct SimState {
@@ -89,6 +93,10 @@ struct SimState {
     tick: i64,
     stats: StatsTracker,
     trade_enabled: bool,
+    // Populated by POST /leads/:id/intent; drained (one-shot) into run_tick's
+    // external_intents each tick - mirrors v1's "a lead with a fresh decision
+    // waiting uses it for exactly one tick" semantics.
+    pending_lead_intents: HashMap<String, Intent>,
 }
 
 struct AppState {
@@ -103,6 +111,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
     let total = sim.agents.len();
     let avg_energy = if population > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population as f64 } else { 0.0 };
     let avg_hunger = if population > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population as f64 } else { 0.0 };
+    let leads: Vec<serde_json::Value> = sim.agents.iter().filter(|a| a.tier == "lead").map(|a| a.public_view()).collect();
     Snapshot {
         tick: sim.tick,
         population,
@@ -112,6 +121,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         specialization_index: sim.stats.specialization_index(&sim.agents),
         trades_cumulative: sim.stats.cumulative_trades(),
         uptime_secs: started_at.elapsed().as_secs(),
+        leads,
     }
 }
 
@@ -121,8 +131,17 @@ async fn main() {
 
     let mut rng = ChaCha8Rng::seed_from_u64(a.seed);
     let world = generate_world(a.nodes, &mut rng);
-    let agents = seam_core::agents::spawn_agents(a.agents, &world, &mut rng);
-    let sim = SimState { world, agents, rng, tick: 0, stats: StatsTracker::new(None), trade_enabled: !a.no_trade };
+    let mut agents = seam_core::agents::spawn_agents(a.agents, &world, &mut rng);
+    agents.extend(spawn_leads(&world, &mut rng));
+    let sim = SimState {
+        world,
+        agents,
+        rng,
+        tick: 0,
+        stats: StatsTracker::new(None),
+        trade_enabled: !a.no_trade,
+        pending_lead_intents: HashMap::new(),
+    };
 
     let (tx, _rx) = broadcast::channel(32);
     let state = Arc::new(AppState { sim: Mutex::new(sim), tx: tx.clone(), started_at: std::time::Instant::now() });
@@ -138,7 +157,8 @@ async fn main() {
                     sim.tick += 1;
                     let trade_enabled = sim.trade_enabled;
                     let tick = sim.tick;
-                    let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled);
+                    let due_intents = std::mem::take(&mut sim.pending_lead_intents);
+                    let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
                     build_snapshot(sim, state.started_at)
                 };
@@ -152,6 +172,12 @@ async fn main() {
         .route("/", get(index_page))
         .route("/state", get(get_state))
         .route("/ws", get(ws_handler))
+        .route("/agents", get(get_agents))
+        .route("/leads", get(get_leads))
+        .route("/leads/:id/candidates", get(get_lead_candidates))
+        .route("/leads/:id/intent", post(post_lead_intent))
+        .route("/leads/:id/memory", post(post_lead_memory))
+        .route("/agents/identities", post(post_agent_identities))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", a.port);
@@ -204,4 +230,142 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             }
         }
     }
+}
+
+fn compute_node_occupancy(agents: &[AgentState]) -> HashMap<String, i32> {
+    let mut occ: HashMap<String, i32> = HashMap::new();
+    for a in agents {
+        if a.alive {
+            *occ.entry(a.location.clone()).or_insert(0) += 1;
+        }
+    }
+    occ
+}
+
+/// Mirrors v1's `leads.py::_describe_candidate` - a short human-readable line
+/// for the numbered list the sidecar turns into an LLM prompt.
+fn describe_intent(intent: &Intent) -> String {
+    let mut parts = vec![intent.action.clone()];
+    if let Some(t) = &intent.target {
+        parts.push(format!("-> {t}"));
+    }
+    if intent.action == "TRADE" {
+        parts.push(format!(
+            "(give {:.0} {}, get {:.0} {})",
+            intent.give_amt,
+            intent.give.as_deref().unwrap_or(""),
+            intent.want_amt,
+            intent.want.as_deref().unwrap_or("")
+        ));
+    }
+    if intent.action == "SIGNAL" {
+        parts.push(format!("({})", intent.resource.as_deref().unwrap_or("")));
+    }
+    parts.join(" ")
+}
+
+/// Full roster (crowd + leads) - id/tier/display_name only, so the sidecar
+/// can find who still needs a name without pulling everyone's full state.
+async fn get_agents(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
+    let sim = state.sim.lock().unwrap();
+    let out: Vec<serde_json::Value> = sim
+        .agents
+        .iter()
+        .map(|a| serde_json::json!({"id": a.id, "tier": a.tier, "display_name": a.display_name}))
+        .collect();
+    Json(out)
+}
+
+async fn get_leads(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
+    let sim = state.sim.lock().unwrap();
+    let leads: Vec<serde_json::Value> = sim.agents.iter().filter(|a| a.tier == "lead").map(|a| a.public_view()).collect();
+    Json(leads)
+}
+
+/// Every legal option for a lead right now, numbered for an LLM prompt.
+/// Includes the full Intent, not just an index - the sidecar echoes the
+/// whole object back in POST /leads/:id/intent, so a few ticks passing
+/// between this GET and that POST (an Ollama call takes real time) can
+/// never desync an index against a candidate list that's moved on; the
+/// normal resolve-time feasibility recheck (same one v1 relies on) handles
+/// anything that's gone stale by the time it's actually applied.
+async fn get_lead_candidates(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    let sim = state.sim.lock().unwrap();
+    let lead = sim.agents.iter().find(|a| a.id == id && a.tier == "lead").ok_or(StatusCode::NOT_FOUND)?;
+    let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == lead.location).collect();
+    let node_occupancy = compute_node_occupancy(&sim.agents);
+    let candidates = generate_candidates(lead, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
+
+    let out: Vec<serde_json::Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, (score, intent))| {
+            serde_json::json!({
+                "index": i + 1,
+                "description": describe_intent(intent),
+                "score": score,
+                "intent": intent,
+            })
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+async fn post_lead_intent(Path(id): Path<String>, State(state): State<Arc<AppState>>, Json(intent): Json<Intent>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    if !sim.agents.iter().any(|a| a.id == id && a.tier == "lead") {
+        return StatusCode::NOT_FOUND;
+    }
+    sim.pending_lead_intents.insert(id, intent);
+    StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct MemoryUpdate {
+    // caution_bias is deliberately not settable here - it's derived
+    // mechanically every tick from the trade/hunger counters (see
+    // AgentState::recompute_caution_bias). This endpoint is for the
+    // LLM-authored narrative text only.
+    memory_summary: Option<String>,
+}
+
+async fn post_lead_memory(Path(id): Path<String>, State(state): State<Arc<AppState>>, Json(update): Json<MemoryUpdate>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    let lead = match sim.agents.iter_mut().find(|a| a.id == id && a.tier == "lead") {
+        Some(l) => l,
+        None => return StatusCode::NOT_FOUND,
+    };
+    if let Some(summary) = update.memory_summary {
+        lead.memory_summary = summary;
+    }
+    StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct IdentityUpdate {
+    id: String,
+    display_name: Option<String>,
+    blurb: Option<String>,
+}
+
+async fn post_agent_identities(State(state): State<Arc<AppState>>, Json(updates): Json<Vec<IdentityUpdate>>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    let mut by_id: HashMap<String, &mut AgentState> = HashMap::new();
+    for a in sim.agents.iter_mut() {
+        by_id.insert(a.id.clone(), a);
+    }
+    for update in updates {
+        if let Some(agent) = by_id.get_mut(&update.id) {
+            if update.display_name.is_some() {
+                agent.display_name = update.display_name;
+            }
+            if update.blurb.is_some() {
+                agent.blurb = update.blurb;
+            }
+        }
+    }
+    StatusCode::OK
 }

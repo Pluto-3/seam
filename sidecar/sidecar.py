@@ -1,0 +1,264 @@
+"""Phase 2 LLM orchestration sidecar - talks to the Rust `serve` service over
+HTTP instead of the simulation living in the same process, the way v1's
+leads.py did.
+
+Same non-blocking shape as v1 (leads.py + watch.py's ThreadPoolExecutor):
+every lead decision runs on a background thread; the main loop never waits
+on Ollama. A lead with no fresh decision posted just keeps running on the
+Rust service's own crowd-style autopilot for that tick - never broken,
+worst case it behaves like a crowd agent, same guarantee v1 made.
+
+    python3 sidecar.py --service http://localhost:7878
+
+Requires: stdlib only. No dependency beyond what's already on the machine
+for v1 (Ollama running locally).
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import time
+import urllib.error
+import urllib.request
+from typing import Optional
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "llama3.2:3b"
+REQUEST_TIMEOUT = 15.0  # seconds
+
+LEAD_DECISION_INTERVAL_SECONDS = 3.0   # real-time equivalent of v1's 20-tick interval
+MEMORY_SUMMARY_INTERVAL_SECONDS = 30.0  # much less frequent - this is the "periodic" self-summary
+
+
+def query_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: float = REQUEST_TIMEOUT) -> Optional[str]:
+    payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+    req = urllib.request.Request(
+        OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return body.get("response")
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+
+
+def _parse_choice(response: Optional[str], n: int) -> Optional[int]:
+    if not response:
+        return None
+    for token in response.strip().split():
+        digits = "".join(c for c in token if c.isdigit())
+        if digits:
+            choice = int(digits)
+            if 1 <= choice <= n:
+                return choice - 1
+    return None
+
+
+class ServiceClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+
+    def _get(self, path: str) -> Optional[object]:
+        try:
+            with urllib.request.urlopen(f"{self.base_url}{path}", timeout=5.0) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return None
+
+    def _post(self, path: str, payload: object) -> bool:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}{path}", data=data, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5.0):
+                return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
+
+    def get_agents(self) -> list[dict]:
+        return self._get("/agents") or []
+
+    def get_leads(self) -> list[dict]:
+        return self._get("/leads") or []
+
+    def get_candidates(self, lead_id: str) -> list[dict]:
+        return self._get(f"/leads/{lead_id}/candidates") or []
+
+    def post_intent(self, lead_id: str, intent: dict) -> bool:
+        return self._post(f"/leads/{lead_id}/intent", intent)
+
+    def post_memory(self, lead_id: str, summary: str) -> bool:
+        return self._post(f"/leads/{lead_id}/memory", {"memory_summary": summary})
+
+    def post_identities(self, updates: list[dict]) -> bool:
+        return self._post("/agents/identities", updates)
+
+
+def build_decision_prompt(lead: dict, candidates: list[dict]) -> str:
+    lines = [
+        f"You are an agent in a small simulated economy. Your goal: {lead['goal']}. "
+        f"Your personality: {lead['personality']}.",
+        f"Current state: energy {lead['energy']:.0f}/100, hunger {lead['hunger']:.0f}/100, "
+        f"holding {lead['inventory']}.",
+    ]
+    if lead.get("memory_summary"):
+        lines.append(f"Your own recent recollection: {lead['memory_summary']}")
+    lines.append("Your available actions right now:")
+    for c in candidates:
+        lines.append(f"{c['index']}. {c['description']}")
+    lines.append(f"Reply with ONLY the number (1-{len(candidates)}) of the action you choose. No other text.")
+    return "\n".join(lines)
+
+
+def build_memory_prompt(lead: dict) -> str:
+    ratio = lead.get("trade_success_ratio")
+    ratio_desc = "no recent trade attempts" if ratio is None else f"{ratio * 100:.0f}% of recent trade attempts succeeded"
+    return (
+        f"You are an agent in a simulated economy. Your goal: {lead['goal']}. "
+        f"Your personality: {lead['personality']}.\n"
+        f"Recently: {ratio_desc}. You've had {lead['hunger_scares_witnessed']} close calls with hunger this run.\n"
+        "Write ONE short first-person sentence reflecting on how things have been going for you. "
+        "No preamble, no quotes, just the sentence."
+    )
+
+
+def decide_for_lead(client: ServiceClient, lead_id: str, model: str) -> None:
+    leads = {l["id"]: l for l in client.get_leads()}
+    lead = leads.get(lead_id)
+    if lead is None or not lead["alive"]:
+        return
+    candidates = client.get_candidates(lead_id)
+    if not candidates:
+        return
+
+    response = query_ollama(build_decision_prompt(lead, candidates), model=model)
+    choice_index = _parse_choice(response, len(candidates))
+    if choice_index is None:
+        # Model failed to answer usefully in time - post nothing. The lead
+        # just runs on the Rust service's own crowd-style autopilot this
+        # tick, exactly the same fallback guarantee v1 made.
+        return
+    client.post_intent(lead_id, candidates[choice_index]["intent"])
+
+
+def summarize_for_lead(client: ServiceClient, lead_id: str, model: str) -> None:
+    leads = {l["id"]: l for l in client.get_leads()}
+    lead = leads.get(lead_id)
+    if lead is None or not lead["alive"]:
+        return
+    response = query_ollama(build_memory_prompt(lead), model=model)
+    if not response:
+        return
+    summary = response.strip().splitlines()[0][:280]
+    client.post_memory(lead_id, summary)
+
+
+CROWD_NAMING_BATCH_SIZE = 10  # one Ollama call per batch, not per agent - cheap flavor, not per-agent cost
+
+
+def _parse_identity_lines(response: Optional[str], ids: list[str]) -> list[dict]:
+    """Parses 'id: Name - blurb' lines, one per agent. Permissive: any line
+    that doesn't parse cleanly is just skipped, not a failure for the batch -
+    a partial set of crowd names is fine, this is cosmetic flavor, not a
+    mechanic anything depends on."""
+    if not response:
+        return []
+    wanted = set(ids)
+    updates = []
+    for line in response.strip().splitlines():
+        if ":" not in line:
+            continue
+        agent_id, rest = line.split(":", 1)
+        agent_id = agent_id.strip()
+        if agent_id not in wanted:
+            continue
+        rest = rest.strip()
+        if "-" in rest:
+            name, blurb = rest.split("-", 1)
+        elif "—" in rest:
+            name, blurb = rest.split("—", 1)
+        else:
+            name, blurb = rest, ""
+        updates.append({"id": agent_id, "display_name": name.strip() or None, "blurb": blurb.strip() or None})
+    return updates
+
+
+def assign_crowd_identities(client: ServiceClient, model: str) -> None:
+    """One-time, batched at startup - a name and one-line identity for every
+    crowd agent that doesn't already have one, a handful of Ollama calls
+    total rather than one per agent."""
+    agents = client.get_agents()
+    unnamed = [a["id"] for a in agents if a["tier"] == "crowd" and not a.get("display_name")]
+    for i in range(0, len(unnamed), CROWD_NAMING_BATCH_SIZE):
+        batch = unnamed[i : i + CROWD_NAMING_BATCH_SIZE]
+        prompt = (
+            "Invent a short first name and a punchy one-line identity for each of these "
+            "characters in a small simulated trading economy. Reply with exactly one line "
+            "per id, in this exact format, no other text:\n"
+            + "\n".join(f"{aid}: <Name> - <one-line identity>" for aid in batch)
+        )
+        response = query_ollama(prompt, model=model)
+        updates = _parse_identity_lines(response, batch)
+        if updates:
+            client.post_identities(updates)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="seam v2 Phase 2 - LLM orchestration sidecar")
+    p.add_argument("--service", default="http://localhost:7878")
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--decision-interval", type=float, default=LEAD_DECISION_INTERVAL_SECONDS)
+    p.add_argument("--memory-interval", type=float, default=MEMORY_SUMMARY_INTERVAL_SECONDS)
+    args = p.parse_args()
+
+    client = ServiceClient(args.service)
+    leads = client.get_leads()
+    if not leads:
+        print(f"no leads found at {args.service}/leads - is `serve` running?")
+        return
+    lead_ids = [l["id"] for l in leads]
+    print(f"sidecar watching leads: {lead_ids} (model={args.model})", flush=True)
+
+    print("assigning crowd identities (one-time, batched)...", flush=True)
+    assign_crowd_identities(client, args.model)
+    print("done", flush=True)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(lead_ids)) * 2)
+    decision_futures: dict[str, concurrent.futures.Future] = {}
+    memory_futures: dict[str, concurrent.futures.Future] = {}
+    next_decision_due = {lid: 0.0 for lid in lead_ids}
+    next_memory_due = {lid: time.monotonic() + args.memory_interval for lid in lead_ids}
+
+    try:
+        while True:
+            now = time.monotonic()
+
+            for lid, fut in list(decision_futures.items()):
+                if fut.done():
+                    del decision_futures[lid]
+
+            for lid, fut in list(memory_futures.items()):
+                if fut.done():
+                    del memory_futures[lid]
+
+            for lid in lead_ids:
+                if now >= next_decision_due[lid] and lid not in decision_futures:
+                    decision_futures[lid] = executor.submit(decide_for_lead, client, lid, args.model)
+                    next_decision_due[lid] = now + args.decision_interval
+
+                if now >= next_memory_due[lid] and lid not in memory_futures:
+                    memory_futures[lid] = executor.submit(summarize_for_lead, client, lid, args.model)
+                    next_memory_due[lid] = now + args.memory_interval
+
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nstopping sidecar")
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+if __name__ == "__main__":
+    main()

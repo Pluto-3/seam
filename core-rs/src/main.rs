@@ -6,9 +6,10 @@
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::collections::HashMap;
 use std::env;
 
-use seam_core::agents::spawn_agents;
+use seam_core::agents::{spawn_agents, spawn_leads};
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
 use seam_core::tick::run_tick;
@@ -25,6 +26,8 @@ struct Args {
     no_trade: bool,
     selftest: bool,
     quiet: bool,
+    with_leads: bool,
+    no_memory: bool,
 }
 
 fn parse_args() -> Args {
@@ -39,6 +42,8 @@ fn parse_args() -> Args {
         no_trade: false,
         selftest: false,
         quiet: false,
+        with_leads: false,
+        no_memory: false,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -84,6 +89,14 @@ fn parse_args() -> Args {
                 a.quiet = true;
                 i += 1;
             }
+            "--with-leads" => {
+                a.with_leads = true;
+                i += 1;
+            }
+            "--no-memory" => {
+                a.no_memory = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -116,7 +129,7 @@ fn selftest(a: &Args) -> i32 {
     let mut agents = spawn_agents(a.agents, &world, &mut rng);
     let trade_enabled = !a.no_trade;
     for t in 1..=50i64 {
-        run_tick(t, &mut world, &mut agents, &mut rng, trade_enabled);
+        run_tick(t, &mut world, &mut agents, &mut rng, trade_enabled, &HashMap::new(), true);
         for ag in &agents {
             if !(-1e-6..=100.0 + 1e-6).contains(&ag.energy) {
                 println!("FAIL: agent {} energy out of range at tick {t}: {}", ag.id, ag.energy);
@@ -156,6 +169,10 @@ fn main() {
     let mut rng = ChaCha8Rng::seed_from_u64(a.seed);
     let mut world = generate_world(a.nodes, &mut rng);
     let mut agent_list = spawn_agents(a.agents, &world, &mut rng);
+    if a.with_leads {
+        agent_list.extend(spawn_leads(&world, &mut rng));
+    }
+    let memory_enabled = !a.no_memory;
 
     ensure_parent_dir(&a.log_path);
     ensure_parent_dir(&a.stats_csv);
@@ -177,7 +194,7 @@ fn main() {
 
     let trade_enabled = !a.no_trade;
     for t in 1..=a.ticks {
-        let entries = run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled);
+        let entries = run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled, &HashMap::new(), memory_enabled);
         for e in &entries {
             log_writer.write(e);
         }

@@ -11,6 +11,13 @@
   button { font-family: inherit; background: #1a1e24; color: #d8dee4; border: 1px solid #3a4150; padding: 0.4rem 0.8rem; margin-right: 0.5rem; cursor: pointer; }
   button:hover { background: #262c35; }
   #log { margin-top: 1.5rem; white-space: pre; color: #6a7280; font-size: 0.85rem; max-height: 220px; overflow-y: auto; border-top: 1px solid #262c35; padding-top: 0.5rem; }
+  h2 { font-size: 0.95rem; color: #8fd3ff; margin-top: 2rem; border-top: 1px solid #262c35; padding-top: 1rem; }
+  .leads { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .lead-card { border: 1px solid #2a303a; background: #12151a; padding: 0.75rem 1rem; width: 280px; }
+  .lead-name { color: #d8dee4; font-weight: bold; }
+  .lead-meta { color: #8891a0; font-size: 0.8rem; margin: 0.15rem 0 0.5rem; }
+  .lead-summary { color: #b7c2cf; font-size: 0.85rem; font-style: italic; margin-top: 0.4rem; }
+  .lead-bias { color: #e0a96d; font-size: 0.78rem; margin-top: 0.4rem; }
 </style>
 <h1>seam — CCTV view</h1>
 <p>status: <span id="status" class="disconnected">disconnected</span></p>
@@ -24,6 +31,8 @@
   <tr><td class="label">cumulative trades</td><td id="trades">-</td></tr>
   <tr><td class="label">specialization index</td><td id="specIdx">-</td></tr>
 </table>
+<h2>leads</h2>
+<div class="leads" id="leads"></div>
 <div id="log"></div>
 <script>
   let ws = null;
@@ -37,6 +46,26 @@
     statusEl.className = connected ? "connected" : "disconnected";
   }
 
+  function escapeHtml(s) {
+    return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderLeads(leads) {
+    const container = document.getElementById("leads");
+    container.innerHTML = (leads || []).map((l) => {
+      const name = l.display_name || l.id;
+      const ratio = l.trade_success_ratio == null ? "n/a" : `${Math.round(l.trade_success_ratio * 100)}%`;
+      return `<div class="lead-card">
+        <div class="lead-name">${escapeHtml(name)}${l.alive ? "" : " (dead)"}</div>
+        <div class="lead-meta">${escapeHtml(l.goal)} — ${escapeHtml(l.personality)}</div>
+        <div class="lead-meta">at ${escapeHtml(l.location)} | energy ${l.energy.toFixed(0)} | hunger ${l.hunger.toFixed(0)}</div>
+        <div class="lead-meta">recent trade success: ${ratio} | hunger scares: ${l.hunger_scares_witnessed}</div>
+        ${l.memory_summary ? `<div class="lead-summary">"${escapeHtml(l.memory_summary)}"</div>` : ""}
+        <div class="lead-bias">caution bias: ${l.caution_bias.toFixed(2)}</div>
+      </div>`;
+    }).join("");
+  }
+
   function render(snap) {
     document.getElementById("tick").textContent = snap.tick;
     document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
@@ -44,6 +73,7 @@
     document.getElementById("avgHunger").textContent = snap.avg_hunger.toFixed(1);
     document.getElementById("trades").textContent = snap.trades_cumulative;
     document.getElementById("specIdx").textContent = snap.specialization_index.toFixed(3);
+    renderLeads(snap.leads);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");

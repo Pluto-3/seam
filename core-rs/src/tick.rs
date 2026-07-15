@@ -44,6 +44,8 @@ pub fn run_tick(
     agents: &mut Vec<AgentState>,
     rng: &mut impl Rng,
     trade_enabled: bool,
+    external_intents: &HashMap<String, Intent>,
+    memory_enabled: bool,
 ) -> Vec<TickLogEntry> {
     let mut entries: Vec<TickLogEntry> = Vec::new();
 
@@ -51,13 +53,19 @@ pub fn run_tick(
     world.regen();
     world.prune_signals(tick);
 
-    // 2. metabolism + death check pass 1
+    // 2. metabolism + death check pass 1 (also: memory bookkeeping for hunger
+    // scares - counts entering the emergency zone once per episode, not once
+    // per tick spent in it)
     for agent in agents.iter_mut() {
         if !agent.alive {
             continue;
         }
+        let was_scared = agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD;
         agent.hunger = (agent.hunger + C::HUNGER_RATE).min(100.0);
         agent.energy = (agent.energy - C::ENERGY_DECAY_RATE).max(0.0);
+        if !was_scared && agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD {
+            agent.hunger_scares_witnessed += 1;
+        }
         if is_dead(agent) {
             entries.push(death_entry(tick, agent));
         }
@@ -85,7 +93,13 @@ pub fn run_tick(
         let loc = agents[idx].location.clone();
         let colocated_idxs = by_location.get(&loc).cloned().unwrap_or_default();
         let colocated: Vec<&AgentState> = colocated_idxs.iter().map(|&i| &agents[i]).collect();
-        let intent = choose_action(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled);
+        // A lead with a fresh decision waiting (from the Python sidecar's LLM
+        // call) uses it for exactly this tick; absent, it runs on the same
+        // autopilot as the crowd - mirrors v1's external_intents semantics.
+        let intent = match external_intents.get(&agents[idx].id) {
+            Some(ov) => ov.clone(),
+            None => choose_action(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled),
+        };
         intents.insert(agents[idx].id.clone(), intent);
     }
 
@@ -108,7 +122,16 @@ pub fn run_tick(
         }
     }
 
-    entries.extend(act::resolve_trade_phase(agents, &id_to_idx, &intents, tick, rng));
+    let trade_entries = act::resolve_trade_phase(agents, &id_to_idx, &intents, tick, rng);
+    // Memory bookkeeping: every agent that attempted a trade this tick records
+    // whether it actually resolved - this is what a lead's periodic
+    // self-summary reads to decide whether it's had "a bad run of trades."
+    for e in &trade_entries {
+        if let Some(&idx) = id_to_idx.get(&e.agent_id) {
+            agents[idx].record_trade_outcome(e.success);
+        }
+    }
+    entries.extend(trade_entries);
 
     for phase in ["REST", "SIGNAL"] {
         let mut actors: Vec<usize> = (0..agents.len())
@@ -130,6 +153,16 @@ pub fn run_tick(
     for agent in agents.iter_mut() {
         if agent.alive && is_dead(agent) {
             entries.push(death_entry(tick, agent));
+        }
+    }
+
+    // 6. memory: recompute each lead's mechanical caution_bias from this
+    // tick's updated counters (no-op for crowd agents). Gateable purely for
+    // the Phase 2 memory-on-vs-off verification experiment - every real
+    // caller (serve, run) leaves this true.
+    if memory_enabled {
+        for agent in agents.iter_mut() {
+            agent.recompute_caution_bias();
         }
     }
 
