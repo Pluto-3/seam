@@ -65,6 +65,19 @@ def _gather_yield_multiplier(agent: AgentState, resource_type: ResourceType) -> 
     return mult
 
 
+def _order_multiplier(node: Node, resource_type: ResourceType) -> float:
+    """A lead issuing a standing order posts an order:<resource> signal at its
+    node (same Signal action, same mechanism a crowd agent's scarce:/rich:
+    signal uses — just a different kind string). This is what makes that
+    signal actually shape crowd behavior rather than being cosmetic: any crowd
+    agent scoring Gather at this node gets a real multiplier on it, not just
+    the smaller Move-routing nudge scarce/rich signals get."""
+    kind = f"order:{resource_type.value}"
+    if any(s.kind == kind for s in node.signals):
+        return C.ORDER_GATHER_MULTIPLIER
+    return 1.0
+
+
 def _bfs_next_hop_to_food(agent: AgentState, world: World) -> Optional[str]:
     """First-hop neighbor on the shortest (unweighted) path to the nearest node
     with food currently available. None if already standing on one, or none
@@ -105,7 +118,7 @@ def _best_local_score(agent: AgentState, node: Node) -> float:
         return 0.0
     if agent.held(node.resource_type) >= C.MAX_USEFUL_HOLDING:
         return 0.0
-    mult = _gather_yield_multiplier(agent, node.resource_type)
+    mult = _gather_yield_multiplier(agent, node.resource_type) * _order_multiplier(node, node.resource_type)
     return marginal_value(agent, node.resource_type) * mult
 
 
@@ -145,7 +158,7 @@ def generate_candidates(agent: AgentState, world: World, colocated: list[AgentSt
     # agent with nothing better to do doesn't gather that resource forever by default
     if (node.resource_type is not None and node.quantity > 0
             and agent.held(node.resource_type) < C.MAX_USEFUL_HOLDING):
-        mult = _gather_yield_multiplier(agent, node.resource_type)
+        mult = _gather_yield_multiplier(agent, node.resource_type) * _order_multiplier(node, node.resource_type)
         score = marginal_value(agent, node.resource_type) * mult
         candidates.append((score, Intent(action="GATHER", target=node.id,
                                           resource=node.resource_type.value)))

@@ -63,6 +63,8 @@ TRADE_MIN_HELD = 1.0             # minimum held to be willing to give up a unit
 
 SIGNAL_VALUE = 4.0               # must be comparable to typical gather/trade scores (~1-20) to ever win
 SIGNAL_MOVE_BONUS = 0.0          # a nudge, not an override — must not dominate the local gather score it's added to
+ORDER_GATHER_MULTIPLIER = 1.6    # a lead's "order:<resource>" signal at a node multiplies Gather's score
+                                  # there for crowd agents — the standing-orders mechanic (Phase 2)
 SIGNAL_LOW_THRESHOLD = 0.2       # node quantity / max_quantity at or below this -> "scarce"
 SIGNAL_HIGH_THRESHOLD = 0.8      # at or above this -> "rich"
 SIGNAL_COOLDOWN = 15             # ticks before the same agent can re-post the same signal kind
