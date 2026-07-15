@@ -64,6 +64,10 @@ class StatsTracker:
                 if resource:
                     self._window_gathers[(e.target, resource)] += 1
 
+    @property
+    def cumulative_trades(self) -> int:
+        return self._trade_leg_count // 2
+
     def specialization_index(self, agents: list[AgentState]) -> float:
         alive = [a for a in agents if a.alive]
         fractions = []
