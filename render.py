@@ -49,11 +49,13 @@ def is_food_emergency(agent: AgentState) -> bool:
     return agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD
 
 
-# The HUD (top-left) is 4 lines and the legend (top-right) is a title + 4 entries -
-# both live in this top band, so the graph itself is inset below it, not under it.
-SIDE_MARGIN = 60
-TOP_MARGIN = 140
-BOTTOM_MARGIN = 60
+# The HUD (top-left, 7 short lines) and legend (top-right, title + 4 entries) both
+# live in this reserved top band, so the graph itself is inset below it, not under
+# it. Measured with pygame's own font.size() against the actual HUD/legend text
+# rather than guessed - see LOG.md for the widths that motivated these numbers.
+SIDE_MARGIN = 70
+TOP_MARGIN = 200
+BOTTOM_MARGIN = 70
 
 
 def to_screen(pos: tuple[float, float], screen_size: tuple[int, int]) -> tuple[int, int]:
@@ -107,11 +109,14 @@ def draw_agents(surface: pygame.Surface, agents: list[AgentState],
         pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
 
 
+LEGEND_WIDTH = 210  # measured: "food emergency" label is ~140px, plus swatch and padding
+
+
 def draw_legend(surface: pygame.Surface, font: pygame.font.Font, screen_size: tuple[int, int]) -> None:
     """Nodes and agent dots share the same color per resource type — this spells
     that out so a viewer isn't expected to just know it."""
     w, _ = screen_size
-    x = w - 190
+    x = w - LEGEND_WIDTH
     y = 10
     title = font.render("resource type", True, TEXT_COLOR)
     surface.blit(title, (x, y))
@@ -127,16 +132,24 @@ def draw_legend(surface: pygame.Surface, font: pygame.font.Font, screen_size: tu
     surface.blit(text, (x + 22, y))
 
 
+HUD_MAX_WIDTH = 470  # measured safe column - see LOG.md; legend starts at w - LEGEND_WIDTH,
+                      # comfortably clear of this at every screen size watch.py actually uses
+
+
 def draw_hud(surface: pygame.Surface, font: pygame.font.Font, *, tick: int, population: int, total: int,
              cumulative_trades: int, cumulative_crafts: int, specialization_idx: float,
              paused: bool, ticks_per_second: float, tunable_name: str, tunable_value: float) -> None:
+    # Kept short and split across lines deliberately - a single wide line here
+    # previously ran clean through the legend column (measured 1050px in a 900px
+    # window). Each line below is measured to stay under HUD_MAX_WIDTH.
     lines = [
-        f"tick {tick}   population {population}/{total} alive ({total - population} dead)",
-        f"trades {cumulative_trades}   crafts {cumulative_crafts}   "
-        f"specialization idx {specialization_idx:.2f}   (0 = no trade effect, higher = more redistribution)",
-        f"{'PAUSED' if paused else 'running'}   speed {ticks_per_second:.1f} ticks/s   "
-        f"[space] pause  [+/-] speed  [esc] quit",
-        f"tunable: {tunable_name} = {tunable_value:.3g}   [tab] cycle  [up/down] adjust 10%",
+        f"tick {tick}   population {population}/{total} ({total - population} dead)",
+        f"trades {cumulative_trades}   crafts {cumulative_crafts}",
+        f"specialization idx {specialization_idx:.2f}  (higher = more trade)",
+        f"{'PAUSED' if paused else 'running'}   speed {ticks_per_second:.1f} ticks/s",
+        "[space] pause   [+/-] speed   [esc] quit",
+        f"tunable: {tunable_name} = {tunable_value:.3g}",
+        "[tab] cycle   [up/down] adjust 10%",
     ]
     y = 10
     for line in lines:

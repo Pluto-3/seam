@@ -26,7 +26,7 @@ from stats import StatsTracker
 from tick import run_tick
 from world import World, generate_world
 
-SCREEN_SIZE = (900, 700)
+SCREEN_SIZE = (1300, 950)
 DEFAULT_TPS = 6.0
 MIN_TPS = 0.5
 MAX_TPS = 60.0
@@ -95,7 +95,7 @@ def main() -> int:
     pygame.init()
     pygame.display.set_caption("seam - Phase 1 live view")
     screen = pygame.display.set_mode(SCREEN_SIZE)
-    font = pygame.font.SysFont("monospace", 16)
+    font = pygame.font.SysFont("monospace", 15)
     clock = pygame.time.Clock()
 
     tick_counter = 0
