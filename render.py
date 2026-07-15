@@ -66,16 +66,35 @@ def is_food_emergency(agent: AgentState) -> bool:
     return agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD
 
 
-# The HUD (top-left, up to 9 lines once possessed) and legend (top-right, title +
-# 9 entries as of the interface catch-up pass) both live in this reserved top
-# band, so the graph itself is inset below it, not under it. Measured with
-# pygame's own font.size() against the actual HUD/legend text rather than
-# guessed - see LOG.md. Legend measured at 230px, HUD at 208px; bumped to 280
-# for real headroom since more HUD/legend content is still coming this pass
-# (event ticker, sparklines) - fixing this properly once, not piecemeal again.
+# The HUD/legend (top corners) and event ticker/sparklines (bottom corners) all
+# live in these reserved bands, so the graph itself is inset clear of all four,
+# not under them. Every number here is measured with pygame's own font metrics,
+# not guessed - see LOG.md for the two rounds of overlap bugs that came from
+# skipping that step. to_screen()'s margins are full-width/full-height bands
+# (independent of the other axis), so as long as a margin is >= the tallest/
+# widest thing living in it, nothing else in that corner needs separate
+# collision handling - this is deliberately the whole strategy.
+#   top:    legend 230px, HUD 208px -> TOP_MARGIN=280 (real headroom, not tight)
+#   bottom: ticker 178px (TICKER_MAX_LINES=8) + 20px gap, sparklines 132px (2
+#           stacked) + 20px gap -> tallest is 198px; BOTTOM_MARGIN=240 adds
+#           NODE_RADIUS_MAX(26)px on top of that for node-overhang safety.
+#
+# Verified empirically, not just by formula: computed real to_screen() positions
+# for every node at 10/12/15/18/20-node worlds (the circular layout's angles
+# depend only on node count, not seed, so this covers the realistic range) and
+# checked each against both boxes with NODE_RADIUS_MAX clearance - 270 collisions
+# found before this fix (see LOG.md), 0 after, re-verified the same way.
 SIDE_MARGIN = 70
 TOP_MARGIN = 280
-BOTTOM_MARGIN = 70
+BOTTOM_MARGIN = 240
+
+TICKER_BOX_HEIGHT_MAX = 178   # measured: TICKER_MAX_LINES(8) lines at 15pt monospace
+SPARKLINE_STACK_HEIGHT = 132  # measured: 2 stacked sparklines (label + chart + gap) x2
+# Must exceed NODE_RADIUS_MAX(26): a node's plotted *center* can sit exactly on
+# the graph boundary, with its visual circle extending up to NODE_RADIUS_MAX
+# beyond that - a gap smaller than that radius still gets grazed. Empirically
+# confirmed: a 10px gap left 65 boundary-case collisions, this closes them.
+BOTTOM_BAND_GAP = 32
 
 
 def to_screen(pos: tuple[float, float], screen_size: tuple[int, int]) -> tuple[int, int]:
@@ -299,7 +318,11 @@ def draw_event_ticker(surface: pygame.Surface, font: pygame.font.Font, lines: li
     shown = lines[-TICKER_MAX_LINES:]
     line_height = font.get_height() + 3
     box_height = len(shown) * line_height + 10
-    box_top = h - BOTTOM_MARGIN - box_height - 10
+    # Inside the reserved bottom band (h - BOTTOM_MARGIN, h), not above it - the
+    # graph's own rendering rectangle ends at h - BOTTOM_MARGIN, so anything
+    # positioned below that line is structurally guaranteed clear of it, not just
+    # clear by virtue of a large-enough margin number.
+    box_top = (h - BOTTOM_MARGIN) + BOTTOM_BAND_GAP
     box = pygame.Surface((TICKER_WIDTH, box_height))
     box.set_alpha(200)
     box.fill(TICKER_BG)

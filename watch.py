@@ -30,10 +30,10 @@ from agents import AgentState, spawn_agents
 from decide import Intent, generate_candidates
 from export_narrative import describe
 from layout import compute_layout
-from render import (BOTTOM_MARGIN, CRAFT_EFFECT_DURATION, DEATH_EFFECT_DURATION, SIDE_MARGIN,
-                     TRADE_EFFECT_DURATION, Effect, draw_agents, draw_effects, draw_event_ticker,
-                     draw_hud, draw_legend, draw_player_moves, draw_sparkline, draw_world,
-                     is_effect_expired)
+from render import (BOTTOM_BAND_GAP, BOTTOM_MARGIN, CRAFT_EFFECT_DURATION, DEATH_EFFECT_DURATION,
+                     SIDE_MARGIN, SPARKLINE_STACK_HEIGHT, TRADE_EFFECT_DURATION, Effect,
+                     draw_agents, draw_effects, draw_event_ticker, draw_hud, draw_legend,
+                     draw_player_moves, draw_sparkline, draw_world, is_effect_expired)
 from stats import StatsTracker
 from tick import run_tick
 from world import RAW_RESOURCES, World, generate_world
@@ -347,8 +347,11 @@ def main() -> int:
         draw_legend(screen, font, SCREEN_SIZE)
         draw_event_ticker(screen, font, list(event_log), SCREEN_SIZE)
 
+        # Inside the reserved bottom band (h - BOTTOM_MARGIN, h), same fix as
+        # draw_event_ticker - positioned *below* the graph's rendering boundary,
+        # not just above it by a margin that happens to be large enough.
         spark_x = SCREEN_SIZE[0] - SIDE_MARGIN - 260
-        spark_y = SCREEN_SIZE[1] - BOTTOM_MARGIN - 130
+        spark_y = (SCREEN_SIZE[1] - BOTTOM_MARGIN) + BOTTOM_BAND_GAP
         spark_y = draw_sparkline(screen, font, list(population_history), (spark_x, spark_y),
                                   "population (recent)", POPULATION_SPARKLINE_COLOR)
         draw_sparkline(screen, font, list(specialization_history), (spark_x, spark_y),
