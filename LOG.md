@@ -129,3 +129,17 @@ Went after the Goal 4 finding directly: agents had no sense of how many others w
 **Re-verified against the same 4 seeds, and this time checked for the oscillation signature directly, not just trusted the aggregate numbers:** fail rate still dropped meaningfully in all four (75.6%->42.2%, 91.1%->58.2%, 92.3%->18.3%, 69.3%->9.4% - notably gentler than the broken version's near-0% everywhere, which in hindsight was itself a warning sign of over-suppression, not a good result). **Population hit 40/40 in all four seeds, including seed 7** - the previously-collapsing world - going from 23/40 to a full recovery. Trade volume rose in 3 of 4 (seed 7: 3,046 -> 44,938 cumulative trades). Checked the most-traveled routes and most-moving agents afterward specifically to rule out a subtler oscillation: the busiest agent now moves in ~10% of ticks and the top route accounts for a normal share of traffic, nowhere near the 73%+-of-ticks-spent-moving, one-route-dominates-everything signature of the earlier regression.
 
 **Not yet done:** this was checked against 4 seeds (1, 5, 7, 9), not the full 20-seed set the earlier batch analysis used - a real, positive result, but not yet given the same statistical weight as the paired trade-effect finding. Re-running the full sweep to confirm this holds broadly, and re-checking whether seed 7's die-off mechanism is now understood (it may simply have been the same contention this fix addresses) are natural next steps, not done in this pass.
+
+## 2026-07-15 — Congestion fix confirmed at full scale (n=20, `analyze_congestion_fix.py`)
+
+Re-ran all 20 seeds (same seeds, same 8,000 ticks as the original batch analysis) with the fix in place and compared directly against the existing `logs/batch` baseline - no more relying on a 4-seed sample.
+
+**Population: 40/40 in every single one of the 20 seeds.** Mean before was 38.6 (stdev 3.9, only 15/20 at full population); after, mean is exactly 40.0 with stdev 0.0. Zero seeds got worse. Five improved outright, including **seed 7 fully recovering from 23/40 to 40/40** - the population collapse that's been tracked since Phase 0 is resolved, not just improved.
+
+**Gather fail rate dropped in all 20/20 seeds**, mean 80.1% -> 28.0%, range now 5.1%-58.2% (was 69.3%-92.3%). Still real contention in places - this isn't claiming the dynamic is eliminated, just brought down to something much less wasteful.
+
+**Cumulative trades rose in all 20/20 seeds**, nearly doubling on average (24,076 -> 48,718) - agents that spend less time failing to gather have more to trade with.
+
+**Specialization index is a wash, not a win - worth saying plainly rather than folding it into the good news.** Mean is essentially unchanged (0.494 -> 0.490), and only 11/20 seeds improved; 9 got slightly worse. Plausible reading, not verified: with less contention, agents succeed at gathering their *own* specialty more reliably than before, which could reduce how much they still need to trade for it even as absolute trade volume rises - but that's a hypothesis from looking at the pattern, not something separately tested. Flagged, not claimed.
+
+Net assessment: this is a real, broad fix for the thing it targeted (contention, population loss) with no population regressions anywhere across 20 seeds, and one metric (specialization) that neither improved nor degraded overall. Committing this as settled; the specialization-mix question and seed 7's original death-trigger mechanism remain open for later, not blocking.
