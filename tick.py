@@ -37,9 +37,18 @@ def _is_dead(agent: AgentState) -> bool:
     return agent.hunger >= C.DEATH_HUNGER_MAX or agent.energy <= C.DEATH_ENERGY_MIN
 
 
-def run_tick(tick: int, world: World, agents: list[AgentState], rng: random.Random) -> list[TickLogEntry]:
+def run_tick(tick: int, world: World, agents: list[AgentState], rng: random.Random,
+             external_intents: dict[str, Intent] | None = None) -> list[TickLogEntry]:
+    """external_intents: for any agent_id present, that Intent is used instead of
+    calling decide.choose_action() for them this tick. Existing callers that don't
+    pass it get exactly Phase 0/1 behavior, unchanged. This is how leads.py's
+    LLM-driven decisions and watch.py's player-hatch input both plug in, without
+    either of them needing to be a first-class concept in the tick loop itself —
+    on any tick they're absent from this dict, the agent just runs the same safe
+    autopilot (decide.choose_action) as every crowd agent."""
     entries: list[TickLogEntry] = []
     agents_by_id = {a.id: a for a in agents}
+    external_intents = external_intents or {}
 
     # 1. housekeeping
     world.regen()
@@ -63,6 +72,9 @@ def run_tick(tick: int, world: World, agents: list[AgentState], rng: random.Rand
     intents: dict[str, Intent] = {}
     for agent in agents:
         if not agent.alive:
+            continue
+        if agent.id in external_intents:
+            intents[agent.id] = external_intents[agent.id]
             continue
         colocated = by_location[agent.location]
         intents[agent.id] = choose_action(agent, world, colocated, tick, rng)

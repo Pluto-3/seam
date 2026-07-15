@@ -20,6 +20,8 @@ class AgentState:
     inventory: dict[str, float] = field(default_factory=dict)
     tool_durability: int = 0
     alive: bool = True
+    goal: str = ""         # unused by crowd; leads.py uses this to build a lead's prompt
+    personality: str = ""  # unused by crowd; same
 
     def held(self, resource: ResourceType) -> float:
         return self.inventory.get(resource.value, 0.0)

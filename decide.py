@@ -121,8 +121,12 @@ def _signal_bonus(agent: AgentState, node: Node) -> float:
     return bonus
 
 
-def _candidates(agent: AgentState, world: World, colocated: list[AgentState],
-                 tick: int) -> list[tuple[float, Intent]]:
+def generate_candidates(agent: AgentState, world: World, colocated: list[AgentState],
+                         tick: int) -> list[tuple[float, Intent]]:
+    """Every legal (score, Intent) pair available to an agent this tick. Public:
+    used both by choose_action's own argmax below and by leads.py, which turns
+    this same list into a multiple-choice question for an LLM-driven lead rather
+    than duplicating the legality/scoring logic."""
     candidates: list[tuple[float, Intent]] = []
     node = world.nodes[agent.location]
 
@@ -206,7 +210,7 @@ def _candidates(agent: AgentState, world: World, colocated: list[AgentState],
 
 def choose_action(agent: AgentState, world: World, colocated: list[AgentState],
                    tick: int, rng: random.Random) -> Intent:
-    candidates = _candidates(agent, world, colocated, tick)
+    candidates = generate_candidates(agent, world, colocated, tick)
     if not candidates:
         return Intent(action="REST")
     best_score = None
