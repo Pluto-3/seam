@@ -1,0 +1,70 @@
+<title>seam — live monitor</title>
+<style>
+  body { font-family: ui-monospace, monospace; background: #0b0d10; color: #d8dee4; margin: 2rem; }
+  h1 { font-size: 1.1rem; color: #8fd3ff; }
+  #status { font-weight: bold; }
+  #status.connected { color: #6ee7a8; }
+  #status.disconnected { color: #ff8080; }
+  table { border-collapse: collapse; margin-top: 1rem; }
+  td { padding: 0.15rem 1rem 0.15rem 0; }
+  td.label { color: #8891a0; }
+  button { font-family: inherit; background: #1a1e24; color: #d8dee4; border: 1px solid #3a4150; padding: 0.4rem 0.8rem; margin-right: 0.5rem; cursor: pointer; }
+  button:hover { background: #262c35; }
+  #log { margin-top: 1.5rem; white-space: pre; color: #6a7280; font-size: 0.85rem; max-height: 220px; overflow-y: auto; border-top: 1px solid #262c35; padding-top: 0.5rem; }
+</style>
+<h1>seam — CCTV view</h1>
+<p>status: <span id="status" class="disconnected">disconnected</span></p>
+<button id="connectBtn">connect</button>
+<button id="disconnectBtn">disconnect</button>
+<table>
+  <tr><td class="label">tick</td><td id="tick">-</td></tr>
+  <tr><td class="label">population</td><td id="population">-</td></tr>
+  <tr><td class="label">avg energy</td><td id="avgEnergy">-</td></tr>
+  <tr><td class="label">avg hunger</td><td id="avgHunger">-</td></tr>
+  <tr><td class="label">cumulative trades</td><td id="trades">-</td></tr>
+  <tr><td class="label">specialization index</td><td id="specIdx">-</td></tr>
+</table>
+<div id="log"></div>
+<script>
+  let ws = null;
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const fields = ["tick", "population", "avg_energy", "avg_hunger", "trades_cumulative", "specialization_index"];
+  const elIds = { tick: "tick", population: "population", avg_energy: "avgEnergy", avg_hunger: "avgHunger", trades_cumulative: "trades", specialization_index: "specIdx" };
+
+  function setStatus(connected) {
+    statusEl.textContent = connected ? "connected" : "disconnected";
+    statusEl.className = connected ? "connected" : "disconnected";
+  }
+
+  function render(snap) {
+    document.getElementById("tick").textContent = snap.tick;
+    document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
+    document.getElementById("avgEnergy").textContent = snap.avg_energy.toFixed(1);
+    document.getElementById("avgHunger").textContent = snap.avg_hunger.toFixed(1);
+    document.getElementById("trades").textContent = snap.trades_cumulative;
+    document.getElementById("specIdx").textContent = snap.specialization_index.toFixed(3);
+
+    const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
+    logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");
+  }
+
+  function connect() {
+    if (ws) return;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    ws.onopen = () => setStatus(true);
+    ws.onclose = () => { setStatus(false); ws = null; };
+    ws.onerror = () => { setStatus(false); };
+    ws.onmessage = (ev) => render(JSON.parse(ev.data));
+  }
+
+  function disconnect() {
+    if (ws) { ws.close(); ws = null; }
+    setStatus(false);
+  }
+
+  document.getElementById("connectBtn").onclick = connect;
+  document.getElementById("disconnectBtn").onclick = disconnect;
+  connect();
+</script>

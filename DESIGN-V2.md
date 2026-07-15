@@ -104,13 +104,25 @@ proves worth continuing, and each has a concrete pass/fail check, not just
   the mechanic - not a Rust translation bug. Full account, including the
   RNG-parity decision (statistical, not bit-exact) and a real disk-space
   snag during the batch runs, in `LOG.md`.
-- **Phase 1 — Service/viewer split.** Wrap the Rust core as a persistent
-  service (ticks on its own, exposes state over an API); stand up the Python
-  sidecar as a thin pass-through (no new LLM logic yet); build a minimal
-  React viewer over WebSocket that can watch the world. **Proof:** start the
-  service, close the viewer, reopen it later, and see the world advanced
-  the whole time — the literal "world keeps existing whether or not anyone's
-  watching" claim, verified, not assumed.
+- **Phase 1 — Service/viewer split. DONE, 2026-07-15.** Wrapped the Rust
+  core as a persistent service (`core-rs/src/serve_main.rs`, a second binary
+  alongside the headless `run`): a background async task ticks the world on
+  its own clock, a `/state` REST endpoint and a `/ws` live-push endpoint
+  expose it, and a static HTML/JS page at `/` connects/disconnects freely
+  without affecting the sim underneath. **Deliberately built the viewer as a
+  single dependency-free HTML file, not React** - the disk was already tight
+  from Phase 0 (15GB free on a 468GB disk) and a full npm/Vite/React
+  toolchain risked adding a large, uncertain footprint for something this
+  phase's proof doesn't actually require; a real React rewrite is deferred
+  to whenever richer UI needs justify it, not treated as owed by default.
+  Also deferred: the Python sidecar - Phase 1's proof doesn't need it, and
+  a pass-through with no logic yet was scaffolding without a job; it lands
+  in Phase 2 when leads actually need LLM orchestration. **Proof:** ran the
+  service, connected over WebSocket, disconnected fully, waited 5 real
+  seconds with zero viewers attached, reconnected, and confirmed the tick
+  counter had advanced by 96 ticks (~600→~698) the entire time no one was
+  watching - the literal "world keeps existing whether or not anyone's
+  watching" claim, verified end-to-end, not assumed.
 - **Phase 2 — Leads: memory + visible identity.** Add the two-layer memory
   (counters + periodic self-summary) and surface name/goal/personality in the
   viewer for both leads and crowd (crowd's batched spawn-time identity).

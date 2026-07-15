@@ -3,15 +3,25 @@ name = "seam-core"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "seam_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "run"
 path = "src/main.rs"
+
+[[bin]]
+name = "serve"
+path = "src/serve_main.rs"
 
 [dependencies]
 rand = "0.8"
 rand_chacha = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+axum = { version = "0.7", features = ["ws"] }
 
 [profile.release]
 opt-level = 3

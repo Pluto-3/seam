@@ -89,6 +89,10 @@ impl StatsTracker {
         }
     }
 
+    pub fn cumulative_trades(&self) -> u64 {
+        self.trade_leg_count / 2
+    }
+
     pub fn specialization_index(&self, agents: &[AgentState]) -> f64 {
         let alive: Vec<&AgentState> = agents.iter().filter(|a| a.alive).collect();
         let mut fractions = Vec::new();

@@ -4,24 +4,15 @@
 //!     run --selftest --seed 0
 //!     run --no-trade --seed 42   (negative control)
 
-mod actions;
-mod agents;
-mod constants;
-mod decide;
-mod log;
-mod stats;
-mod tick;
-mod world;
-
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::env;
 
-use agents::spawn_agents;
-use log::JsonlWriter;
-use stats::StatsTracker;
-use tick::run_tick;
-use world::generate_world;
+use seam_core::agents::spawn_agents;
+use seam_core::log::JsonlWriter;
+use seam_core::stats::StatsTracker;
+use seam_core::tick::run_tick;
+use seam_core::world::generate_world;
 
 struct Args {
     ticks: i64,
