@@ -14,6 +14,7 @@ simulation core needed to know about either concept.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import random
 import sys
 import time
@@ -137,6 +138,16 @@ def main() -> int:
     player_pending_intent: Optional[Intent] = None
     player_move_targets: list[str] = []
 
+    # Lead decisions run in a background thread pool, never inline in the main
+    # loop: an Ollama call that's slow (model still loading, machine under load,
+    # etc.) would otherwise freeze the entire window for its duration - X11 tends
+    # to mark a frozen app as "not responding," which reads as crashing even
+    # though nothing actually raised. A lead just keeps its prior behavior
+    # (absent from external_intents -> safe autopilot) until its future resolves,
+    # whenever that happens to be - not pinned to an exact tick.
+    lead_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, NUM_LEADS))
+    lead_futures: dict[str, concurrent.futures.Future] = {}
+
     running = True
     while running:
         dt_ms = clock.tick(60)
@@ -197,11 +208,24 @@ def main() -> int:
                 tick_counter += 1
 
                 external_intents: dict[str, Intent] = {}
+
+                # Collect any lead decisions that finished in the background since
+                # the last tick, whenever that happened to be.
+                for lead_id, future in list(lead_futures.items()):
+                    if future.done():
+                        intent, _was_llm = future.result()
+                        external_intents[lead_id] = intent
+                        del lead_futures[lead_id]
+
+                # Kick off a fresh decision for any lead that's due and not
+                # already waiting on one - never blocks.
                 for lead in lead_agents:
-                    if lead.alive and tick_counter % leads.LEAD_DECISION_INTERVAL == 0:
+                    if (lead.alive and tick_counter % leads.LEAD_DECISION_INTERVAL == 0
+                            and lead.id not in lead_futures):
                         colocated = [a for a in all_agents if a.alive and a.location == lead.location]
-                        intent, _was_llm = leads.decide_lead_action(lead, world, colocated, tick_counter)
-                        external_intents[lead.id] = intent
+                        lead_futures[lead.id] = lead_executor.submit(
+                            leads.decide_lead_action, lead, world, colocated, tick_counter)
+
                 if possessed and player_agent.alive:
                     external_intents[player_agent.id] = player_pending_intent or Intent(action="REST")
                     player_pending_intent = None
@@ -244,6 +268,7 @@ def main() -> int:
         if args.quit_after is not None and (time.monotonic() - start_time) >= args.quit_after:
             running = False
 
+    lead_executor.shutdown(wait=False, cancel_futures=True)
     pygame.quit()
     return 0
 
