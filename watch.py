@@ -94,6 +94,14 @@ def initial_render_positions(agents, layout: dict[str, tuple[float, float]]) -> 
     return {a.id: layout[a.location] for a in agents}
 
 
+def compute_node_occupancy(agents) -> dict[str, int]:
+    occupancy: dict[str, int] = {}
+    for a in agents:
+        if a.alive:
+            occupancy[a.location] = occupancy.get(a.location, 0) + 1
+    return occupancy
+
+
 def spawn_player(world: World, rng: random.Random) -> AgentState:
     return AgentState(
         id="player",
@@ -191,7 +199,8 @@ def main() -> int:
                     player_pending_intent = Intent(action="REST")
                 elif possessed and event.key == pygame.K_t:
                     colocated = [a for a in all_agents if a.alive and a.location == player_agent.location]
-                    candidates = generate_candidates(player_agent, world, colocated, tick_counter)
+                    candidates = generate_candidates(player_agent, world, colocated, tick_counter,
+                                                      compute_node_occupancy(all_agents))
                     trade_candidates = [(s, i) for s, i in candidates if i.action == "TRADE"]
                     if trade_candidates:
                         player_pending_intent = max(trade_candidates, key=lambda pair: pair[0])[1]
@@ -219,12 +228,15 @@ def main() -> int:
 
                 # Kick off a fresh decision for any lead that's due and not
                 # already waiting on one - never blocks.
-                for lead in lead_agents:
-                    if (lead.alive and tick_counter % leads.LEAD_DECISION_INTERVAL == 0
-                            and lead.id not in lead_futures):
+                due_leads = [lead for lead in lead_agents
+                             if lead.alive and tick_counter % leads.LEAD_DECISION_INTERVAL == 0
+                             and lead.id not in lead_futures]
+                if due_leads:
+                    node_occupancy = compute_node_occupancy(all_agents)
+                    for lead in due_leads:
                         colocated = [a for a in all_agents if a.alive and a.location == lead.location]
                         lead_futures[lead.id] = lead_executor.submit(
-                            leads.decide_lead_action, lead, world, colocated, tick_counter)
+                            leads.decide_lead_action, lead, world, colocated, tick_counter, node_occupancy)
 
                 if possessed and player_agent.alive:
                     external_intents[player_agent.id] = player_pending_intent or Intent(action="REST")

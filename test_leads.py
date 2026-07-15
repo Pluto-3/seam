@@ -51,7 +51,11 @@ def main() -> None:
             if tick % leads.LEAD_DECISION_INTERVAL != 0:
                 continue
             colocated = [a for a in all_agents if a.alive and a.location == lead.location]
-            intent, was_llm = leads.decide_lead_action(lead, world, colocated, tick, model=model)
+            node_occupancy = {}
+            for a in all_agents:
+                if a.alive:
+                    node_occupancy[a.location] = node_occupancy.get(a.location, 0) + 1
+            intent, was_llm = leads.decide_lead_action(lead, world, colocated, tick, node_occupancy, model=model)
             external_intents[lead.id] = intent
             if was_llm:
                 llm_choices += 1

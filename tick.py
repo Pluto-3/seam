@@ -68,6 +68,7 @@ def run_tick(tick: int, world: World, agents: list[AgentState], rng: random.Rand
     for agent in agents:
         if agent.alive:
             by_location[agent.location].append(agent)
+    node_occupancy: dict[str, int] = {loc: len(occupants) for loc, occupants in by_location.items()}
 
     intents: dict[str, Intent] = {}
     for agent in agents:
@@ -77,7 +78,7 @@ def run_tick(tick: int, world: World, agents: list[AgentState], rng: random.Rand
             intents[agent.id] = external_intents[agent.id]
             continue
         colocated = by_location[agent.location]
-        intents[agent.id] = choose_action(agent, world, colocated, tick, rng)
+        intents[agent.id] = choose_action(agent, world, colocated, tick, rng, node_occupancy)
 
     # 4. resolve in fixed phase order, each phase in shuffled agent order
     for phase in _RESOLVE_ORDER:

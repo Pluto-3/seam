@@ -65,6 +65,26 @@ def _gather_yield_multiplier(agent: AgentState, resource_type: ResourceType) -> 
     return mult
 
 
+def _congestion_factor(node_id: str, agent: AgentState, node_occupancy: dict[str, int]) -> float:
+    """Discounts a node's Gather score by how many other agents are already
+    there right now — a cheap, first-order proxy for "how likely is this
+    gather to actually succeed" (verified: ~80% of all gather attempts failed
+    from uncoordinated pileup before this existed, see LOG.md).
+
+    Deliberately the SAME function for both the direct Gather candidate (this
+    agent's own node) and the Move lookahead (a neighbor's node) — an earlier
+    version only discounted the direct case, which meant a crowded node looked
+    congested when standing on it but falsely uncongested when evaluated as a
+    move target from next door, producing a stable back-and-forth oscillation
+    (same failure mode as the SIGNAL_MOVE_BONUS regression earlier this
+    project). node_occupancy is a single node_id -> agent-count snapshot built
+    once per tick, not per-node agent lists, to keep this cheap."""
+    count = node_occupancy.get(node_id, 0)
+    if node_id == agent.location:
+        count -= 1  # exclude self
+    return 1.0 / (1.0 + max(0, count) * C.CONGESTION_WEIGHT)
+
+
 def _order_multiplier(node: Node, resource_type: ResourceType) -> float:
     """A lead issuing a standing order posts an order:<resource> signal at its
     node (same Signal action, same mechanism a crowd agent's scarce:/rich:
@@ -113,13 +133,14 @@ def _can_signal(agent: AgentState, node: Node, kind: str, tick: int) -> bool:
     return True
 
 
-def _best_local_score(agent: AgentState, node: Node) -> float:
+def _best_local_score(agent: AgentState, node: Node, node_occupancy: dict[str, int]) -> float:
     if node.resource_type is None or node.quantity <= 0:
         return 0.0
     if agent.held(node.resource_type) >= C.MAX_USEFUL_HOLDING:
         return 0.0
     mult = _gather_yield_multiplier(agent, node.resource_type) * _order_multiplier(node, node.resource_type)
-    return marginal_value(agent, node.resource_type) * mult
+    congestion = _congestion_factor(node.id, agent, node_occupancy)
+    return marginal_value(agent, node.resource_type) * mult * congestion
 
 
 def _signal_bonus(agent: AgentState, node: Node) -> float:
@@ -135,11 +156,15 @@ def _signal_bonus(agent: AgentState, node: Node) -> float:
 
 
 def generate_candidates(agent: AgentState, world: World, colocated: list[AgentState],
-                         tick: int) -> list[tuple[float, Intent]]:
+                         tick: int, node_occupancy: dict[str, int]) -> list[tuple[float, Intent]]:
     """Every legal (score, Intent) pair available to an agent this tick. Public:
     used both by choose_action's own argmax below and by leads.py, which turns
     this same list into a multiple-choice question for an LLM-driven lead rather
-    than duplicating the legality/scoring logic."""
+    than duplicating the legality/scoring logic.
+
+    node_occupancy: a node_id -> agent-count snapshot built once per tick (see
+    tick.py), used for congestion-awareness in both the direct Gather candidate
+    and the Move lookahead - see _congestion_factor for why both need it."""
     candidates: list[tuple[float, Intent]] = []
     node = world.nodes[agent.location]
 
@@ -155,11 +180,14 @@ def generate_candidates(agent: AgentState, world: World, colocated: list[AgentSt
     candidates.append((energy_pressure(agent) * C.REST_ENERGY_GAIN, Intent(action="REST")))
 
     # Gather — capped once an agent is already holding a generous surplus, so an idle
-    # agent with nothing better to do doesn't gather that resource forever by default
+    # agent with nothing better to do doesn't gather that resource forever by default.
+    # Also discounted by local congestion (see constants.py) so agents don't all pile
+    # onto the same node and fail most of their attempts.
     if (node.resource_type is not None and node.quantity > 0
             and agent.held(node.resource_type) < C.MAX_USEFUL_HOLDING):
         mult = _gather_yield_multiplier(agent, node.resource_type) * _order_multiplier(node, node.resource_type)
-        score = marginal_value(agent, node.resource_type) * mult
+        congestion = _congestion_factor(node.id, agent, node_occupancy)
+        score = marginal_value(agent, node.resource_type) * mult * congestion
         candidates.append((score, Intent(action="GATHER", target=node.id,
                                           resource=node.resource_type.value)))
 
@@ -211,7 +239,7 @@ def generate_candidates(agent: AgentState, world: World, colocated: list[AgentSt
     for edge in world.neighbors(agent.location):
         neighbor_id = edge.other(agent.location)
         neighbor = world.nodes[neighbor_id]
-        local_best = _best_local_score(agent, neighbor)
+        local_best = _best_local_score(agent, neighbor, node_occupancy)
         bonus = _signal_bonus(agent, neighbor)
         score = local_best * (C.MOVE_LOOKAHEAD_DISCOUNT ** edge.cost) + bonus
         if emergency_hop is not None and neighbor_id == emergency_hop:
@@ -222,8 +250,8 @@ def generate_candidates(agent: AgentState, world: World, colocated: list[AgentSt
 
 
 def choose_action(agent: AgentState, world: World, colocated: list[AgentState],
-                   tick: int, rng: random.Random) -> Intent:
-    candidates = generate_candidates(agent, world, colocated, tick)
+                   tick: int, rng: random.Random, node_occupancy: dict[str, int]) -> Intent:
+    candidates = generate_candidates(agent, world, colocated, tick, node_occupancy)
     if not candidates:
         return Intent(action="REST")
     best_score = None

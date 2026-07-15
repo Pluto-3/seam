@@ -106,11 +106,12 @@ def _parse_choice(response: Optional[str], n: int) -> Optional[int]:
 
 
 def decide_lead_action(agent: AgentState, world: World, colocated: list[AgentState],
-                        tick: int, model: str = DEFAULT_MODEL) -> tuple[Intent, bool]:
+                        tick: int, node_occupancy: dict[str, int],
+                        model: str = DEFAULT_MODEL) -> tuple[Intent, bool]:
     """Returns (intent, was_llm_choice). was_llm_choice=False means the argmax
     fallback fired - the model failed to respond in time, or gave an answer
     that didn't parse to a valid option."""
-    candidates = generate_candidates(agent, world, colocated, tick)
+    candidates = generate_candidates(agent, world, colocated, tick, node_occupancy)
     if not candidates:
         return Intent(action="REST"), False
 
