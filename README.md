@@ -53,3 +53,7 @@ python export_narrative.py --log-path logs/run.jsonl --out story.md
 ## Tech
 
 Python (standard library only for the simulation core — no dependencies to run a headless simulation at all), pygame for the live view, Ollama for local LLM inference. No API keys required anywhere.
+
+## License
+
+[MIT](LICENSE)
