@@ -36,6 +36,7 @@ struct Args {
     log_path: Option<String>,
     stats_csv: Option<String>,
     stats_every_secs: u64,
+    full_log: bool,
 }
 
 fn parse_args() -> Args {
@@ -49,6 +50,7 @@ fn parse_args() -> Args {
         log_path: None,
         stats_csv: None,
         stats_every_secs: 30,
+        full_log: false,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -90,6 +92,10 @@ fn parse_args() -> Args {
                 a.stats_every_secs = argv[i + 1].parse().expect("--stats-every-secs must be an integer");
                 i += 2;
             }
+            "--full-log" => {
+                a.full_log = true;
+                i += 1;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -123,10 +129,12 @@ struct SimState {
     // external_intents each tick - mirrors v1's "a lead with a fresh decision
     // waiting uses it for exactly one tick" semantics.
     pending_lead_intents: HashMap<String, Intent>,
-    // Lead-tier + DEATH entries only, never the crowd's own gather/move/rest
-    // noise - a long unattended run would otherwise burn disk fast for data
-    // nobody's actually going to read (see LOG.md).
+    // Default: lead-tier + DEATH entries only, never the crowd's own
+    // gather/move/rest noise - a long unattended run would otherwise burn
+    // disk fast for data nobody's actually going to read (see LOG.md).
+    // full_log opts into logging every tier, once disk headroom allows it.
     log_writer: Option<JsonlWriter>,
+    full_log: bool,
     stats_every_secs: u64,
     last_stats_write: std::time::Instant,
 }
@@ -190,6 +198,7 @@ async fn main() {
         trade_enabled: !a.no_trade,
         pending_lead_intents: HashMap::new(),
         log_writer: a.log_path.as_deref().map(JsonlWriter::new),
+        full_log: a.full_log,
         stats_every_secs: a.stats_every_secs,
         last_stats_write: std::time::Instant::now(),
     };
@@ -213,8 +222,9 @@ async fn main() {
                     sim.stats.consume(&entries);
 
                     if let Some(writer) = sim.log_writer.as_mut() {
+                        let full_log = sim.full_log;
                         for e in &entries {
-                            if e.tier == "lead" || e.action == "DEATH" {
+                            if full_log || e.tier == "lead" || e.action == "DEATH" {
                                 writer.write(e);
                             }
                         }
