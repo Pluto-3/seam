@@ -21,7 +21,7 @@ import pygame
 import constants as C
 from agents import spawn_agents
 from layout import compute_layout
-from render import draw_agents, draw_hud, draw_world
+from render import draw_agents, draw_hud, draw_legend, draw_world
 from stats import StatsTracker
 from tick import run_tick
 from world import World, generate_world
@@ -31,6 +31,40 @@ DEFAULT_TPS = 6.0
 MIN_TPS = 0.5
 MAX_TPS = 60.0
 SMOOTHING_RATE = 8.0  # higher = snappier catch-up to the target node position
+TUNE_STEP = 0.10       # +/- 10% per keypress
+
+# A curated subset of constants.py worth adjusting live — not all ~35 constants
+# change anything you'd notice on screen. Transient only: these edits affect this
+# run's `constants` module in memory, never written back to constants.py, so the
+# file on disk is never touched by watching a live run.
+TUNABLE_CONSTANTS = [
+    "SPECIALTY_GATHER_MULTIPLIER",
+    "HUNGER_RATE",
+    "CONSUME_HUNGER_RELIEF",
+    "MAX_USEFUL_HOLDING",
+    "TOOL_DURABILITY",
+    "SIGNAL_MOVE_BONUS",
+]
+
+
+ZERO_STEP = 0.5  # a purely multiplicative step can never move a value off exactly zero
+                  # (e.g. SIGNAL_MOVE_BONUS starts at 0.0, deliberately, per LOG.md) —
+                  # this is the seed value an increase-from-zero jumps to instead
+
+
+def adjust_tunable(name: str, direction: int) -> float:
+    """direction: +1 to increase 10%, -1 to decrease 10%. Preserves int-ness for
+    constants like TOOL_DURABILITY so it doesn't quietly turn into a float."""
+    current = getattr(C, name)
+    if current == 0:
+        new_value = ZERO_STEP if direction > 0 else 0.0
+    else:
+        factor = (1.0 + TUNE_STEP) if direction > 0 else 1.0 / (1.0 + TUNE_STEP)
+        new_value = current * factor
+    if isinstance(current, int):
+        new_value = max(1, round(new_value))
+    setattr(C, name, new_value)
+    return new_value
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +103,7 @@ def main() -> int:
     ticks_per_second = args.tps
     tick_accumulator = 0.0
     start_time = time.monotonic()
+    tunable_index = 0
 
     running = True
     while running:
@@ -87,6 +122,12 @@ def main() -> int:
                     ticks_per_second = min(MAX_TPS, ticks_per_second * 1.5)
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                     ticks_per_second = max(MIN_TPS, ticks_per_second / 1.5)
+                elif event.key == pygame.K_TAB:
+                    tunable_index = (tunable_index + 1) % len(TUNABLE_CONSTANTS)
+                elif event.key == pygame.K_UP:
+                    adjust_tunable(TUNABLE_CONSTANTS[tunable_index], +1)
+                elif event.key == pygame.K_DOWN:
+                    adjust_tunable(TUNABLE_CONSTANTS[tunable_index], -1)
 
         if not paused and any(a.alive for a in agents):
             tick_accumulator += dt
@@ -109,12 +150,16 @@ def main() -> int:
         screen.fill((18, 18, 24))
         draw_world(screen, world, layout, SCREEN_SIZE)
         draw_agents(screen, agents, render_pos, SCREEN_SIZE)
+        draw_legend(screen, font, SCREEN_SIZE)
         population = sum(1 for a in agents if a.alive)
+        tunable_name = TUNABLE_CONSTANTS[tunable_index]
         draw_hud(
             screen, font,
             tick=tick_counter, population=population, total=len(agents),
             cumulative_trades=stats.cumulative_trades, cumulative_crafts=stats.cumulative_crafts,
+            specialization_idx=stats.specialization_index(agents),
             paused=paused, ticks_per_second=ticks_per_second,
+            tunable_name=tunable_name, tunable_value=getattr(C, tunable_name),
         )
         pygame.display.flip()
 

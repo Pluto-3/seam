@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pygame
 
+import constants as C
 from agents import AgentState
 from world import ResourceType, World
 
@@ -30,6 +31,22 @@ AGENT_COLORS = {
 NODE_RADIUS_MIN = 8
 NODE_RADIUS_MAX = 26
 AGENT_RADIUS = 4
+EMERGENCY_RING_COLOR = (230, 60, 60)
+EMERGENCY_RING_RADIUS = AGENT_RADIUS + 3
+
+RESOURCE_LABELS = {
+    ResourceType.ORE: "ore",
+    ResourceType.FOOD: "food",
+    ResourceType.WOOD: "wood",
+}
+
+
+def is_food_emergency(agent: AgentState) -> bool:
+    """Mirrors decide.py's own emergency-routing trigger — an agent this hungry
+    with no food in hand is currently BFS-pathfinding toward food rather than
+    behaving greedily. Recomputed here from public state, not shared internal
+    state, so render.py stays decoupled from decide.py's internals."""
+    return agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD
 
 
 def to_screen(pos: tuple[float, float], screen_size: tuple[int, int], margin: int = 70) -> tuple[int, int]:
@@ -77,17 +94,42 @@ def draw_agents(surface: pygame.Surface, agents: list[AgentState],
         if pos is None:
             continue
         screen_pos = to_screen(pos, screen_size)
+        if is_food_emergency(agent):
+            pygame.draw.circle(surface, EMERGENCY_RING_COLOR, screen_pos, EMERGENCY_RING_RADIUS, 1)
         color = AGENT_COLORS.get(agent.specialty, TEXT_COLOR)
         pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
 
 
+def draw_legend(surface: pygame.Surface, font: pygame.font.Font, screen_size: tuple[int, int]) -> None:
+    """Nodes and agent dots share the same color per resource type — this spells
+    that out so a viewer isn't expected to just know it."""
+    w, _ = screen_size
+    x = w - 190
+    y = 10
+    title = font.render("resource type", True, TEXT_COLOR)
+    surface.blit(title, (x, y))
+    y += title.get_height() + 4
+    for resource, label in RESOURCE_LABELS.items():
+        color = NODE_COLORS[resource]
+        pygame.draw.circle(surface, color, (x + 8, y + 8), 7)
+        text = font.render(label, True, TEXT_COLOR)
+        surface.blit(text, (x + 22, y))
+        y += text.get_height() + 4
+    pygame.draw.circle(surface, EMERGENCY_RING_COLOR, (x + 8, y + 8), 7, 1)
+    text = font.render("food emergency", True, TEXT_COLOR)
+    surface.blit(text, (x + 22, y))
+
+
 def draw_hud(surface: pygame.Surface, font: pygame.font.Font, *, tick: int, population: int, total: int,
-             cumulative_trades: int, cumulative_crafts: int, paused: bool, ticks_per_second: float) -> None:
+             cumulative_trades: int, cumulative_crafts: int, specialization_idx: float,
+             paused: bool, ticks_per_second: float, tunable_name: str, tunable_value: float) -> None:
     lines = [
-        f"tick {tick}   population {population}/{total}   "
-        f"trades {cumulative_trades}   crafts {cumulative_crafts}",
+        f"tick {tick}   population {population}/{total} alive ({total - population} dead)",
+        f"trades {cumulative_trades}   crafts {cumulative_crafts}   "
+        f"specialization idx {specialization_idx:.2f}   (0 = no trade effect, higher = more redistribution)",
         f"{'PAUSED' if paused else 'running'}   speed {ticks_per_second:.1f} ticks/s   "
         f"[space] pause  [+/-] speed  [esc] quit",
+        f"tunable: {tunable_name} = {tunable_value:.3g}   [tab] cycle  [up/down] adjust 10%",
     ]
     y = 10
     for line in lines:
