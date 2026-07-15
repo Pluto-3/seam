@@ -39,8 +39,9 @@ RAW_BASE_VALUE = 5.0
 TOOL_BASE_VALUE = 15.0
 CRAFT_COMPLEMENT_BONUS = 4.0     # bonus value for a raw resource when its craft partner is already held
 
-CONSUME_HUNGER_RELIEF = 20.0     # hunger points relieved per Consume action
-CONSUME_FOOD_PER_ACTION = 1.0
+CONSUME_HUNGER_RELIEF = 20.0     # hunger points relieved by consuming a full CONSUME_FOOD_PER_ACTION unit
+CONSUME_FOOD_PER_ACTION = 1.0    # a Consume with less than this held still fires, scaled proportionally —
+                                  # an all-or-nothing threshold here strands fractional gathers permanently
 
 REST_ENERGY_GAIN = 15.0
 
@@ -48,6 +49,10 @@ SPECIALTY_GATHER_MULTIPLIER = 2.0
 OFF_SPECIALTY_GATHER_MULTIPLIER = 0.5
 TOOL_GATHER_MULTIPLIER = 1.5
 GATHER_AMOUNT = 3.0              # base units gathered per Gather action, before multipliers
+MAX_USEFUL_HOLDING = 25.0        # stop generating a Gather candidate for a resource once held this much —
+                                  # without this, an idle agent with nothing better to do keeps gathering
+                                  # forever since a shrinking-but-still-positive score still beats a Rest/
+                                  # Consume score that's genuinely zero once needs are satisfied
 
 CRAFT_ORE_COST = 1.0
 CRAFT_WOOD_COST = 1.0
@@ -65,3 +70,11 @@ SIGNAL_TTL = 30                  # ticks before a signal is pruned
 
 MOVE_LOOKAHEAD_DISCOUNT = 0.85   # per unit of edge cost
 JITTER = 0.05                    # +/- 5% random jitter on scores to break brittle ties
+
+# The 1-hop Move lookahead can't see food more than one edge away, which lets an agent
+# get topologically stranded (its whole neighborhood is ore/wood) and starve while busily
+# gathering/crafting nearby. This is a targeted escape valve, not a general lookahead: once
+# hunger crosses the threshold with no food in hand, pathfind (BFS, unweighted) to the
+# nearest node with food currently available and bias Move toward the first hop of that path.
+HUNGER_EMERGENCY_THRESHOLD = 60.0
+EMERGENCY_FOOD_BONUS = 20.0      # scaled by hunger_pressure, so it ramps in rather than snapping on

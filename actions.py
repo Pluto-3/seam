@@ -73,10 +73,13 @@ def resolve_craft(agent: AgentState, intent: Intent, tick: int) -> TickLogEntry:
 
 def resolve_consume(agent: AgentState, intent: Intent, tick: int) -> TickLogEntry:
     before = agent.snapshot()
-    success = agent.held(ResourceType.FOOD) >= C.CONSUME_FOOD_PER_ACTION
+    held = agent.held(ResourceType.FOOD)
+    success = held > 0
     if success:
-        agent.remove(ResourceType.FOOD, C.CONSUME_FOOD_PER_ACTION)
-        agent.hunger = max(0.0, agent.hunger - C.CONSUME_HUNGER_RELIEF)
+        amount = min(held, C.CONSUME_FOOD_PER_ACTION)
+        relief = C.CONSUME_HUNGER_RELIEF * (amount / C.CONSUME_FOOD_PER_ACTION)
+        agent.remove(ResourceType.FOOD, amount)
+        agent.hunger = max(0.0, agent.hunger - relief)
     after = agent.snapshot()
     return _entry(tick, agent, "CONSUME", None, success, before, after)
 

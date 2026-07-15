@@ -10,6 +10,7 @@ logic — an agent with 5 food and 0 wood values wood more than its 6th food.
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -64,6 +65,34 @@ def _gather_yield_multiplier(agent: AgentState, resource_type: ResourceType) -> 
     return mult
 
 
+def _bfs_next_hop_to_food(agent: AgentState, world: World) -> Optional[str]:
+    """First-hop neighbor on the shortest (unweighted) path to the nearest node
+    with food currently available. None if already standing on one, or none
+    is reachable at all."""
+    start = agent.location
+    start_node = world.nodes[start]
+    if start_node.resource_type == ResourceType.FOOD and start_node.quantity > 0:
+        return None
+
+    visited = {start}
+    queue = deque((edge.other(start), edge.other(start)) for edge in world.neighbors(start))
+    for _, first_hop in list(queue):
+        visited.add(first_hop)
+
+    while queue:
+        current, first_hop = queue.popleft()
+        node = world.nodes[current]
+        if node.resource_type == ResourceType.FOOD and node.quantity > 0:
+            return first_hop
+        for edge in world.neighbors(current):
+            nxt = edge.other(current)
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            queue.append((nxt, first_hop))
+    return None
+
+
 def _can_signal(agent: AgentState, node: Node, kind: str, tick: int) -> bool:
     for s in node.signals:
         if s.posted_by == agent.id and s.kind == kind and tick - s.tick < C.SIGNAL_COOLDOWN:
@@ -73,6 +102,8 @@ def _can_signal(agent: AgentState, node: Node, kind: str, tick: int) -> bool:
 
 def _best_local_score(agent: AgentState, node: Node) -> float:
     if node.resource_type is None or node.quantity <= 0:
+        return 0.0
+    if agent.held(node.resource_type) >= C.MAX_USEFUL_HOLDING:
         return 0.0
     mult = _gather_yield_multiplier(agent, node.resource_type)
     return marginal_value(agent, node.resource_type) * mult
@@ -95,16 +126,21 @@ def _candidates(agent: AgentState, world: World, colocated: list[AgentState],
     candidates: list[tuple[float, Intent]] = []
     node = world.nodes[agent.location]
 
-    # Consume
-    if agent.held(ResourceType.FOOD) >= C.CONSUME_FOOD_PER_ACTION:
-        score = hunger_pressure(agent) * C.CONSUME_HUNGER_RELIEF
+    # Consume — any positive amount is usable, scaled proportionally, so a fractional
+    # gather below CONSUME_FOOD_PER_ACTION is never permanently stranded
+    held_food = agent.held(ResourceType.FOOD)
+    if held_food > 0:
+        consumed_fraction = min(held_food, C.CONSUME_FOOD_PER_ACTION) / C.CONSUME_FOOD_PER_ACTION
+        score = hunger_pressure(agent) * C.CONSUME_HUNGER_RELIEF * consumed_fraction
         candidates.append((score, Intent(action="CONSUME", resource=ResourceType.FOOD.value)))
 
     # Rest — always feasible, the only energy-recovering action
     candidates.append((energy_pressure(agent) * C.REST_ENERGY_GAIN, Intent(action="REST")))
 
-    # Gather
-    if node.resource_type is not None and node.quantity > 0:
+    # Gather — capped once an agent is already holding a generous surplus, so an idle
+    # agent with nothing better to do doesn't gather that resource forever by default
+    if (node.resource_type is not None and node.quantity > 0
+            and agent.held(node.resource_type) < C.MAX_USEFUL_HOLDING):
         mult = _gather_yield_multiplier(agent, node.resource_type)
         score = marginal_value(agent, node.resource_type) * mult
         candidates.append((score, Intent(action="GATHER", target=node.id,
@@ -149,12 +185,20 @@ def _candidates(agent: AgentState, world: World, colocated: list[AgentState],
             candidates.append((C.SIGNAL_VALUE, Intent(action="SIGNAL", target=node.id, resource=kind)))
 
     # Move: 1-hop lookahead, discounted by edge cost, nudged by signals at the neighbor
+    # and, when critically hungry with no food in hand, by a BFS path toward food that
+    # the 1-hop lookahead alone could never see (see constants.py for why this exists)
+    emergency_hop = None
+    if agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD:
+        emergency_hop = _bfs_next_hop_to_food(agent, world)
+
     for edge in world.neighbors(agent.location):
         neighbor_id = edge.other(agent.location)
         neighbor = world.nodes[neighbor_id]
         local_best = _best_local_score(agent, neighbor)
         bonus = _signal_bonus(agent, neighbor)
         score = local_best * (C.MOVE_LOOKAHEAD_DISCOUNT ** edge.cost) + bonus
+        if emergency_hop is not None and neighbor_id == emergency_hop:
+            score += C.EMERGENCY_FOOD_BONUS * hunger_pressure(agent)
         candidates.append((score, Intent(action="MOVE", target=neighbor_id)))
 
     return candidates
