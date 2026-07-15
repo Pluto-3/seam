@@ -5,6 +5,8 @@ it. No simulation logic lives here.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pygame
 
 import constants as C
@@ -34,6 +36,12 @@ AGENT_RADIUS = 4
 EMERGENCY_RING_COLOR = (230, 60, 60)
 EMERGENCY_RING_RADIUS = AGENT_RADIUS + 3
 
+LEAD_RADIUS = 7                    # larger than a crowd dot - "visually findable" per the Phase 2 plan
+LEAD_RING_COLOR = (230, 190, 60)   # gold ring around a lead's specialty-colored dot
+PLAYER_RADIUS = 8
+PLAYER_RING_COLOR_AUTOPILOT = (100, 200, 230)   # thin ring - the hatch, idling
+PLAYER_RING_COLOR_POSSESSED = (255, 255, 255)   # thick bright ring - actively driven
+
 RESOURCE_LABELS = {
     ResourceType.ORE: "ore",
     ResourceType.FOOD: "food",
@@ -49,12 +57,13 @@ def is_food_emergency(agent: AgentState) -> bool:
     return agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD
 
 
-# The HUD (top-left, 7 short lines) and legend (top-right, title + 4 entries) both
-# live in this reserved top band, so the graph itself is inset below it, not under
-# it. Measured with pygame's own font.size() against the actual HUD/legend text
-# rather than guessed - see LOG.md for the widths that motivated these numbers.
+# The HUD (top-left, up to 9 lines once possessed) and legend (top-right, title +
+# 6 entries) both live in this reserved top band, so the graph itself is inset
+# below it, not under it. Measured with pygame's own font.size() against the
+# actual HUD/legend text rather than guessed - see LOG.md. HUD height measured
+# at 208px with the hatch keymap line showing; 240 leaves real headroom.
 SIDE_MARGIN = 70
-TOP_MARGIN = 200
+TOP_MARGIN = 240
 BOTTOM_MARGIN = 70
 
 
@@ -95,7 +104,8 @@ def draw_world(surface: pygame.Surface, world: World, layout: dict[str, tuple[fl
 
 
 def draw_agents(surface: pygame.Surface, agents: list[AgentState],
-                 render_pos: dict[str, tuple[float, float]], screen_size: tuple[int, int]) -> None:
+                 render_pos: dict[str, tuple[float, float]], screen_size: tuple[int, int], *,
+                 player_agent_id: Optional[str] = None, possessed: bool = False) -> None:
     for agent in agents:
         if not agent.alive:
             continue
@@ -106,7 +116,17 @@ def draw_agents(surface: pygame.Surface, agents: list[AgentState],
         if is_food_emergency(agent):
             pygame.draw.circle(surface, EMERGENCY_RING_COLOR, screen_pos, EMERGENCY_RING_RADIUS, 1)
         color = AGENT_COLORS.get(agent.specialty, TEXT_COLOR)
-        pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
+
+        if agent.id == player_agent_id:
+            ring_color = PLAYER_RING_COLOR_POSSESSED if possessed else PLAYER_RING_COLOR_AUTOPILOT
+            ring_width = 3 if possessed else 1
+            pygame.draw.circle(surface, ring_color, screen_pos, PLAYER_RADIUS, ring_width)
+            pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
+        elif agent.tier == "lead":
+            pygame.draw.circle(surface, LEAD_RING_COLOR, screen_pos, LEAD_RADIUS, 2)
+            pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
+        else:
+            pygame.draw.circle(surface, color, screen_pos, AGENT_RADIUS)
 
 
 LEGEND_WIDTH = 210  # measured: "food emergency" label is ~140px, plus swatch and padding
@@ -130,15 +150,39 @@ def draw_legend(surface: pygame.Surface, font: pygame.font.Font, screen_size: tu
     pygame.draw.circle(surface, EMERGENCY_RING_COLOR, (x + 8, y + 8), 7, 1)
     text = font.render("food emergency", True, TEXT_COLOR)
     surface.blit(text, (x + 22, y))
+    y += text.get_height() + 4
+    pygame.draw.circle(surface, LEAD_RING_COLOR, (x + 8, y + 8), 7, 2)
+    text = font.render("lead", True, TEXT_COLOR)
+    surface.blit(text, (x + 22, y))
+    y += text.get_height() + 4
+    pygame.draw.circle(surface, PLAYER_RING_COLOR_POSSESSED, (x + 8, y + 8), 7, 2)
+    text = font.render("you (hatch)", True, TEXT_COLOR)
+    surface.blit(text, (x + 22, y))
 
 
-HUD_MAX_WIDTH = 470  # measured safe column - see LOG.md; legend starts at w - LEGEND_WIDTH,
-                      # comfortably clear of this at every screen size watch.py actually uses
+def draw_player_moves(surface: pygame.Surface, font: pygame.font.Font, world: World,
+                       player_location: str, layout: dict[str, tuple[float, float]],
+                       screen_size: tuple[int, int]) -> list[str]:
+    """Draws a number label near each neighbor of the player's current node, and
+    returns the ordered list of neighbor node ids so watch.py can map a number
+    key back to a specific move target. Only meaningful while possessed."""
+    neighbor_ids = [edge.other(player_location) for edge in world.neighbors(player_location)]
+    for i, neighbor_id in enumerate(neighbor_ids[:9]):
+        pos = to_screen(layout[neighbor_id], screen_size)
+        label = font.render(str(i + 1), True, (255, 255, 0))
+        surface.blit(label, (pos[0] - 6, pos[1] - 26))
+    return neighbor_ids
+
+
+HUD_MAX_WIDTH = 570  # measured widest HUD line (the possessed keymap hint) - what actually
+                      # matters is staying clear of the legend (starts at w - LEGEND_WIDTH =
+                      # 1090 at the current 1300px width), not this number in isolation
 
 
 def draw_hud(surface: pygame.Surface, font: pygame.font.Font, *, tick: int, population: int, total: int,
              cumulative_trades: int, cumulative_crafts: int, specialization_idx: float,
-             paused: bool, ticks_per_second: float, tunable_name: str, tunable_value: float) -> None:
+             paused: bool, ticks_per_second: float, tunable_name: str, tunable_value: float,
+             possessed: bool = False) -> None:
     # Kept short and split across lines deliberately - a single wide line here
     # previously ran clean through the legend column (measured 1050px in a 900px
     # window). Each line below is measured to stay under HUD_MAX_WIDTH.
@@ -150,7 +194,10 @@ def draw_hud(surface: pygame.Surface, font: pygame.font.Font, *, tick: int, popu
         "[space] pause   [+/-] speed   [esc] quit",
         f"tunable: {tunable_name} = {tunable_value:.3g}",
         "[tab] cycle   [up/down] adjust 10%",
+        f"hatch: {'POSSESSED (you)' if possessed else 'autopilot'}   [p] possess/release",
     ]
+    if possessed:
+        lines.append("[1-9] move  [g]ather [c]onsume [f]craft [r]est [t]rade [x]order")
     y = 10
     for line in lines:
         text_surface = font.render(line, True, TEXT_COLOR)
