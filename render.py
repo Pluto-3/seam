@@ -49,14 +49,21 @@ def is_food_emergency(agent: AgentState) -> bool:
     return agent.hunger >= C.HUNGER_EMERGENCY_THRESHOLD and agent.held(ResourceType.FOOD) < C.TRADE_MIN_HELD
 
 
-def to_screen(pos: tuple[float, float], screen_size: tuple[int, int], margin: int = 70) -> tuple[int, int]:
+# The HUD (top-left) is 4 lines and the legend (top-right) is a title + 4 entries -
+# both live in this top band, so the graph itself is inset below it, not under it.
+SIDE_MARGIN = 60
+TOP_MARGIN = 140
+BOTTOM_MARGIN = 60
+
+
+def to_screen(pos: tuple[float, float], screen_size: tuple[int, int]) -> tuple[int, int]:
     x, y = pos
     w, h = screen_size
-    usable_w = w - 2 * margin
-    usable_h = h - 2 * margin
+    usable_w = w - 2 * SIDE_MARGIN
+    usable_h = h - TOP_MARGIN - BOTTOM_MARGIN
     # layout coords are in [-1, 1] on both axes
-    sx = margin + (x + 1.0) / 2.0 * usable_w
-    sy = margin + (y + 1.0) / 2.0 * usable_h
+    sx = SIDE_MARGIN + (x + 1.0) / 2.0 * usable_w
+    sy = TOP_MARGIN + (y + 1.0) / 2.0 * usable_h
     return int(sx), int(sy)
 
 
