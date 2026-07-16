@@ -37,6 +37,8 @@ struct Args {
     stats_csv: Option<String>,
     stats_every_secs: u64,
     full_log: bool,
+    postgres_url: Option<String>,
+    run_id: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -51,6 +53,8 @@ fn parse_args() -> Args {
         stats_csv: None,
         stats_every_secs: 30,
         full_log: false,
+        postgres_url: None,
+        run_id: None,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -95,6 +99,14 @@ fn parse_args() -> Args {
             "--full-log" => {
                 a.full_log = true;
                 i += 1;
+            }
+            "--postgres-url" => {
+                a.postgres_url = Some(argv[i + 1].clone());
+                i += 2;
+            }
+            "--run-id" => {
+                a.run_id = Some(argv[i + 1].clone());
+                i += 2;
             }
             other => {
                 eprintln!("unknown arg: {other}");
@@ -161,6 +173,79 @@ struct AppState {
     sim: Mutex<SimState>,
     tx: broadcast::Sender<Snapshot>,
     started_at: std::time::Instant,
+    // Phase 5: additive, not a replacement for the JSONL log_writer above -
+    // None when --postgres-url isn't passed, zero behavior change either way.
+    pg: Option<Arc<tokio_postgres::Client>>,
+    run_id: String,
+}
+
+struct PgEventRow {
+    tick: i64,
+    agent_id: String,
+    tier: String,
+    specialty: Option<String>,
+    action: String,
+    target: Option<String>,
+    success: bool,
+    state_before: serde_json::Value,
+    state_after: serde_json::Value,
+    delta: serde_json::Value,
+}
+
+struct PgLeadMemRow {
+    lead_id: String,
+    memory_summary: String,
+    caution_bias: f64,
+    trade_success_ratio: Option<f64>,
+    hunger_scares_witnessed: i32,
+}
+
+struct PgSettlementRow {
+    node: String,
+    population_alive: i32,
+    roster_size: i32,
+    avg_energy: f64,
+    avg_hunger: f64,
+    total_food_held: f64,
+}
+
+/// Writes to Postgres happen here, after the sim lock is already released -
+/// a std::sync::MutexGuard can't be held across an .await, so everything
+/// that needs persisting is extracted into plain owned rows first (see the
+/// tick loop above) and the actual database calls all happen down here.
+async fn persist_tick(
+    pg: &tokio_postgres::Client,
+    run_id: &str,
+    tick: i64,
+    events: Vec<PgEventRow>,
+    lead_memory: Vec<PgLeadMemRow>,
+    settlement: Option<PgSettlementRow>,
+) {
+    for e in events {
+        let _ = pg.execute(
+            "INSERT INTO events (run_id, tick, agent_id, tier, specialty, action, target, success, state_before, state_after, delta)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[&run_id, &e.tick, &e.agent_id, &e.tier, &e.specialty, &e.action, &e.target, &e.success, &e.state_before, &e.state_after, &e.delta],
+        ).await;
+    }
+
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+
+    for m in lead_memory {
+        let _ = pg.execute(
+            "INSERT INTO lead_memory_snapshots (run_id, tick, lead_id, memory_summary, caution_bias, trade_success_ratio, hunger_scares_witnessed, ts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[&run_id, &tick, &m.lead_id, &m.memory_summary, &m.caution_bias, &m.trade_success_ratio, &m.hunger_scares_witnessed, &ts],
+        ).await;
+    }
+
+    if let Some(s) = settlement {
+        let _ = pg.execute(
+            "INSERT INTO settlement_snapshots (run_id, tick, node, population_alive, roster_size, avg_energy, avg_hunger, total_food_held, ts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[&run_id, &tick, &s.node, &s.population_alive, &s.roster_size, &s.avg_energy, &s.avg_hunger, &s.total_food_held, &ts],
+        ).await;
+    }
 }
 
 /// Raw numbers only, deliberately no composite score - population, average
@@ -266,14 +351,38 @@ async fn main() {
         narrative_feed: std::collections::VecDeque::new(),
     };
 
+    let run_id = a.run_id.clone().unwrap_or_else(|| {
+        format!("run-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
+    });
+
+    let pg = match &a.postgres_url {
+        Some(url) => {
+            let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+                .await
+                .expect("could not connect to postgres - check --postgres-url");
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("postgres connection error: {e}");
+                }
+            });
+            println!("connected to postgres, run_id={run_id}");
+            Some(Arc::new(client))
+        }
+        None => None,
+    };
+
     let (tx, _rx) = broadcast::channel(32);
-    let state = Arc::new(AppState { sim: Mutex::new(sim), tx: tx.clone(), started_at: std::time::Instant::now() });
+    let state = Arc::new(AppState { sim: Mutex::new(sim), tx: tx.clone(), started_at: std::time::Instant::now(), pg, run_id });
 
     {
         let state = state.clone();
         let tick_ms = a.tick_ms;
         tokio::spawn(async move {
             loop {
+                let mut pg_events: Vec<PgEventRow> = Vec::new();
+                let mut pg_lead_memory: Vec<PgLeadMemRow> = Vec::new();
+                let mut pg_settlement: Option<PgSettlementRow> = None;
+
                 let snap = {
                     let mut guard = state.sim.lock().unwrap();
                     let sim: &mut SimState = &mut guard;
@@ -284,22 +393,70 @@ async fn main() {
                     let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
 
+                    let full_log = sim.full_log;
+                    let keep = |e: &seam_core::log::TickLogEntry| full_log || e.tier == "lead" || e.action == "DEATH";
+
                     if let Some(writer) = sim.log_writer.as_mut() {
-                        let full_log = sim.full_log;
                         for e in &entries {
-                            if full_log || e.tier == "lead" || e.action == "DEATH" {
+                            if keep(e) {
                                 writer.write(e);
                             }
                         }
                     }
-                    if sim.last_stats_write.elapsed().as_secs() >= sim.stats_every_secs {
+
+                    if state.pg.is_some() {
+                        for e in entries.iter().filter(|e| keep(e)) {
+                            let specialty = sim.agents.iter().find(|a| a.id == e.agent_id).map(|a| a.specialty.as_str().to_string());
+                            pg_events.push(PgEventRow {
+                                tick: e.tick,
+                                agent_id: e.agent_id.clone(),
+                                tier: e.tier.clone(),
+                                specialty,
+                                action: e.action.clone(),
+                                target: e.target.clone(),
+                                success: e.success,
+                                state_before: e.state_before.clone(),
+                                state_after: e.state_after.clone(),
+                                delta: e.delta.clone(),
+                            });
+                        }
+                    }
+
+                    let due_for_periodic = sim.last_stats_write.elapsed().as_secs() >= sim.stats_every_secs;
+                    if due_for_periodic {
                         sim.stats.snapshot(tick, &sim.agents, &sim.world, false);
                         sim.last_stats_write = std::time::Instant::now();
+
+                        if state.pg.is_some() {
+                            for lead in sim.agents.iter().filter(|a| a.tier == "lead") {
+                                pg_lead_memory.push(PgLeadMemRow {
+                                    lead_id: lead.id.clone(),
+                                    memory_summary: lead.memory_summary.clone(),
+                                    caution_bias: lead.caution_bias,
+                                    trade_success_ratio: lead.trade_success_ratio(),
+                                    hunger_scares_witnessed: lead.hunger_scares_witnessed as i32,
+                                });
+                            }
+                            let sv = build_settlement_view(sim);
+                            pg_settlement = Some(PgSettlementRow {
+                                node: sv["node"].as_str().unwrap_or("").to_string(),
+                                population_alive: sv["population_alive"].as_i64().unwrap_or(0) as i32,
+                                roster_size: sv["roster_size"].as_i64().unwrap_or(0) as i32,
+                                avg_energy: sv["avg_energy"].as_f64().unwrap_or(0.0),
+                                avg_hunger: sv["avg_hunger"].as_f64().unwrap_or(0.0),
+                                total_food_held: sv["total_food_held"].as_f64().unwrap_or(0.0),
+                            });
+                        }
                     }
 
                     build_snapshot(sim, state.started_at)
                 };
-                let _ = state.tx.send(snap);
+                let _ = state.tx.send(snap.clone());
+
+                if let Some(pg) = &state.pg {
+                    persist_tick(pg, &state.run_id, snap.tick, pg_events, pg_lead_memory, pg_settlement).await;
+                }
+
                 tokio::time::sleep(Duration::from_millis(tick_ms)).await;
             }
         });
@@ -519,17 +676,25 @@ struct NarrativeUpdate {
 /// additive from the sim's perspective - nothing here can affect the
 /// simulation itself, this is read-only narration layered on top.
 async fn post_narrative(State(state): State<Arc<AppState>>, Json(update): Json<NarrativeUpdate>) -> StatusCode {
-    let mut sim = state.sim.lock().unwrap();
-    let tick = sim.tick;
-    let entry = serde_json::json!({
-        "tick": tick,
-        "text": update.text,
-        "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-    });
-    sim.narrative_feed.push_back(entry);
-    while sim.narrative_feed.len() > NARRATIVE_FEED_CAP {
-        sim.narrative_feed.pop_front();
+    let (tick, ts) = {
+        let mut sim = state.sim.lock().unwrap();
+        let tick = sim.tick;
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let entry = serde_json::json!({ "tick": tick, "text": update.text, "ts": ts });
+        sim.narrative_feed.push_back(entry);
+        while sim.narrative_feed.len() > NARRATIVE_FEED_CAP {
+            sim.narrative_feed.pop_front();
+        }
+        (tick, ts as i64)
+    };
+
+    if let Some(pg) = &state.pg {
+        let _ = pg.execute(
+            "INSERT INTO narrative_scenes (run_id, tick, text, ts) VALUES ($1, $2, $3, $4)",
+            &[&state.run_id, &tick, &update.text, &ts],
+        ).await;
     }
+
     StatusCode::OK
 }
 

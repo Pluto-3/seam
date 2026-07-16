@@ -1,21 +1,26 @@
-"""Strategy exporter (Phase 3): mines a run's log for what actually correlates
-with doing well, and can compare two runs the same way the congestion-fix
-analysis did by hand. Read-only, same as every exporter.
+"""Strategy exporter (Phase 3, specialty gap closed Phase 5): mines a run's
+log for what actually correlates with doing well, and can compare two runs
+the same way the congestion-fix analysis did by hand. Read-only, same as
+every exporter.
 
 Reinterpreted from the original design doc on purpose (see DESIGN.md / plan
 for the full reasoning): crowd agents don't carry varying weight-sets to
 compare, so "strategy" here means mining which *agents* did well and what
 distinguished them, not comparing hypothetical policy variants.
 
-Real limitation, not worked around with a guess: agent `specialty` isn't part
-of the logged schema (agents.AgentState.snapshot() doesn't include it), so
-specialization index can't be recomputed from the JSONL alone. Compare mode
-uses the paired `_stats.csv` file for that one metric when present (the same
-file run.py always writes alongside a log, computed live from real agent
-objects) and says so plainly when it isn't available, rather than
-approximating specialty from gather frequency.
+A real limitation from v1, closed for v2 runs rather than worked around:
+agent `specialty` was never part of the logged schema (agents.py's
+snapshot() doesn't include it), so specialization index couldn't be
+recomputed from the JSONL alone - compare mode had to fall back to a
+paired `_stats.csv` file for that one metric. Postgres's `events` table now
+logs specialty directly (see core-rs/schema.sql), so v2 runs compute it
+straight from the event stream, same formula as `stats.rs`'s
+specialization_index. v1 JSONL mode keeps the old paired-CSV fallback
+unchanged - nothing about that limitation was fabricated away, it just
+doesn't apply to the new data.
 
     python export_strategy.py single --log-path logs/batch_post_fix/seed7.jsonl
+    python export_strategy.py single --postgres-url "dbname=seam" --run-id run-123
     python export_strategy.py compare --before logs/batch/seed7.jsonl --after logs/batch_post_fix/seed7.jsonl
 """
 
@@ -43,10 +48,54 @@ def _final_stats_row(csv_path: str) -> dict:
     return {k: (float(v) if "." in v else int(v)) for k, v in row.items()}
 
 
-def _scan_log(jsonl_path: str):
-    """One pass over the log: per-agent final state + action counts, plus
-    run-wide gather/trade/craft/death tallies."""
+def read_events_from_jsonl(log_path: str):
+    with open(log_path) as f:
+        for line in f:
+            yield json.loads(line)
+
+
+def read_events_from_postgres(postgres_url: str, run_id: str):
+    import psycopg2
+    import psycopg2.extras
+
+    conn = psycopg2.connect(postgres_url)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT tick, agent_id, tier, specialty, action, target, success, state_after, delta "
+                "FROM events WHERE run_id = %s ORDER BY tick",
+                (run_id,),
+            )
+            for row in cur:
+                yield dict(row)
+    finally:
+        conn.close()
+
+
+def _specialization_index(agent_last: dict, agent_specialty: dict) -> float | None:
+    """Same formula as core-rs/src/stats.rs's specialization_index: for each
+    alive agent with real holdings, what fraction of their inventory is
+    outside their own specialty - averaged across agents. None if specialty
+    isn't known for anyone (v1 JSONL mode)."""
+    fractions = []
+    for aid, state in agent_last.items():
+        specialty = agent_specialty.get(aid)
+        if not specialty or not state.get("alive"):
+            continue
+        inv = state.get("inventory", {})
+        total = sum(inv.get(r, 0.0) for r in RAW_RESOURCES)
+        if total <= 0:
+            continue
+        non_specialty = total - inv.get(specialty, 0.0)
+        fractions.append(non_specialty / total)
+    return sum(fractions) / len(fractions) if fractions else None
+
+
+def _scan_events(entries):
+    """One pass over the event stream: per-agent final state + action
+    counts, plus run-wide gather/trade/craft/death tallies."""
     agent_last: dict[str, dict] = {}
+    agent_specialty: dict[str, str] = {}
     agent_actions: dict[str, Counter] = {}
     gather_success, gather_fail = 0, 0
     trade_count = 0
@@ -54,34 +103,35 @@ def _scan_log(jsonl_path: str):
     death_count = 0
     max_tick = 0
 
-    with open(jsonl_path) as f:
-        for line in f:
-            e = json.loads(line)
-            aid = e["agent_id"]
-            max_tick = max(max_tick, e["tick"])
-            agent_last[aid] = e["state_after"]
-            agent_actions.setdefault(aid, Counter())[e["action"]] += 1
+    for e in entries:
+        aid = e["agent_id"]
+        max_tick = max(max_tick, e["tick"])
+        agent_last[aid] = e["state_after"]
+        if e.get("specialty"):
+            agent_specialty[aid] = e["specialty"]
+        agent_actions.setdefault(aid, Counter())[e["action"]] += 1
 
-            if e["action"] == "GATHER":
-                if e["success"]:
-                    gather_success += 1
-                else:
-                    gather_fail += 1
-            elif e["action"] == "TRADE" and e["success"]:
-                # each successful swap produces two log entries (initiator + responder,
-                # see actions.py's resolve_trade_phase) - count swaps, not entries, to
-                # match the "trades" convention used everywhere else in this project
-                trade_count += 0.5
-            elif e["action"] == "CRAFT" and e["success"]:
-                craft_count += 1
-            elif e["action"] == "DEATH":
-                death_count += 1
+        if e["action"] == "GATHER":
+            if e["success"]:
+                gather_success += 1
+            else:
+                gather_fail += 1
+        elif e["action"] == "TRADE" and e["success"]:
+            # each successful swap produces two log entries (initiator + responder,
+            # see actions.py's resolve_trade_phase) - count swaps, not entries, to
+            # match the "trades" convention used everywhere else in this project
+            trade_count += 0.5
+        elif e["action"] == "CRAFT" and e["success"]:
+            craft_count += 1
+        elif e["action"] == "DEATH":
+            death_count += 1
 
     return {
-        "agent_last": agent_last, "agent_actions": agent_actions,
+        "agent_last": agent_last, "agent_specialty": agent_specialty, "agent_actions": agent_actions,
         "gather_success": gather_success, "gather_fail": gather_fail,
         "trade_count": trade_count, "craft_count": craft_count,
         "death_count": death_count, "max_tick": max_tick,
+        "specialization_index": _specialization_index(agent_last, agent_specialty),
     }
 
 
@@ -90,8 +140,8 @@ def _wealth(state: dict) -> float:
     return sum(inv.get(r, 0.0) for r in RAW_RESOURCES)
 
 
-def single_run(log_path: str) -> None:
-    scan = _scan_log(log_path)
+def single_run(entries, source_label: str) -> None:
+    scan = _scan_events(entries)
     agent_last = scan["agent_last"]
 
     ranked = sorted(
@@ -113,11 +163,13 @@ def single_run(log_path: str) -> None:
 
     alive_count = sum(1 for s in agent_last.values() if s.get("alive"))
 
-    print(f"=== single-run strategy report: {log_path} ===")
+    print(f"=== single-run strategy report: {source_label} ===")
     print(f"agents: {n}  alive at end: {alive_count}  ticks: {scan['max_tick']}")
     print(f"run totals: {int(scan['trade_count'])} trades, {scan['craft_count']} crafts, "
           f"{scan['death_count']} deaths, gather fail rate "
           f"{scan['gather_fail'] / max(1, scan['gather_success'] + scan['gather_fail']) * 100:.1f}%")
+    if scan["specialization_index"] is not None:
+        print(f"specialization index: {scan['specialization_index']:.3f} (computed directly - specialty was logged)")
     print()
     print(f"top quartile ({quartile} agents) — mean wealth {sum(_wealth(s) for _, s in top) / quartile:.1f}:")
     print(f"  action mix: { {k: round(v, 3) for k, v in action_profile(top).items()} }")
@@ -132,8 +184,8 @@ def single_run(log_path: str) -> None:
 
 
 def compare(before_path: str, after_path: str) -> None:
-    before = _scan_log(before_path)
-    after = _scan_log(after_path)
+    before = _scan_events(read_events_from_jsonl(before_path))
+    after = _scan_events(read_events_from_jsonl(after_path))
 
     before_alive = sum(1 for s in before["agent_last"].values() if s.get("alive"))
     after_alive = sum(1 for s in after["agent_last"].values() if s.get("alive"))
@@ -146,6 +198,11 @@ def compare(before_path: str, after_path: str) -> None:
     print(f"cumulative crafts:         {before['craft_count']} -> {after['craft_count']}")
     print(f"deaths:                    {before['death_count']} -> {after['death_count']}")
     print(f"gather fail rate:          {before_fail_rate:.1f}% -> {after_fail_rate:.1f}%")
+
+    if before["specialization_index"] is not None and after["specialization_index"] is not None:
+        print(f"specialization index:      {before['specialization_index']:.3f} -> {after['specialization_index']:.3f}  "
+              f"(computed directly - specialty was logged)")
+        return
 
     before_csv = _paired_stats_csv(before_path)
     after_csv = _paired_stats_csv(after_path)
@@ -165,7 +222,9 @@ def main() -> None:
     sub = p.add_subparsers(dest="mode", required=True)
 
     single_p = sub.add_parser("single")
-    single_p.add_argument("--log-path", required=True)
+    single_p.add_argument("--log-path", default=None, help="v1-style JSONL log")
+    single_p.add_argument("--postgres-url", default=None, help="v2 alternative to --log-path, e.g. 'dbname=seam'")
+    single_p.add_argument("--run-id", default=None, help="required with --postgres-url")
 
     compare_p = sub.add_parser("compare")
     compare_p.add_argument("--before", required=True)
@@ -173,7 +232,14 @@ def main() -> None:
 
     args = p.parse_args()
     if args.mode == "single":
-        single_run(args.log_path)
+        if bool(args.log_path) == bool(args.postgres_url):
+            single_p.error("pass exactly one of --log-path or --postgres-url")
+        if args.postgres_url and not args.run_id:
+            single_p.error("--postgres-url requires --run-id")
+        if args.log_path:
+            single_run(read_events_from_jsonl(args.log_path), args.log_path)
+        else:
+            single_run(read_events_from_postgres(args.postgres_url, args.run_id), f"postgres:{args.run_id}")
     else:
         compare(args.before, args.after)
 

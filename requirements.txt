@@ -1,1 +1,2 @@
 pygame
+psycopg2-binary

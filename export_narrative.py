@@ -1,6 +1,7 @@
-"""Narrative exporter (Phase 3): filters a run's log down to what's actually
-worth reading and renders it as a markdown story. Read-only, same as every
-exporter - never imports tick.py/decide.py/actions.py, never runs a sim.
+"""Narrative exporter (Phase 3, real scenes added Phase 5): filters a run's
+log down to what's actually worth reading and renders it as a markdown
+story. Read-only, same as every exporter - never imports
+tick.py/decide.py/actions.py, never runs a sim.
 
 Deliberately excludes routine crowd gather/trade/rest: at 40 agents taking
 thousands of actions, including it would bury the signal, not add spectacle.
@@ -10,7 +11,15 @@ event that's dramatically meaningful). Template-based text from the log's own
 fields - no LLM call, so no risk of the blocking-call problem from Phase 2
 for something that doesn't need it.
 
+In Postgres mode (v2 runs only - a v1 JSONL log has no narrative_scenes
+table), the real LLM-authored scenes from Phase 4's sidecar are merged in
+at their actual tick position, set off from the templated event lines so
+it's clear which is which. This is a genuine upgrade over v1, not a
+re-implementation: v1 had to synthesize prose from raw log lines because no
+real narrative existed yet.
+
     python export_narrative.py --log-path logs/batch/seed7.jsonl --out story.md
+    python export_narrative.py --postgres-url "dbname=seam" --run-id run-123 --out story.md
 """
 
 from __future__ import annotations
@@ -66,20 +75,62 @@ def describe(e: dict) -> str:
     return f"**Tick {tick}** — {agent} performs {action}."
 
 
-def export(log_path: str, out_path: str, title: str) -> int:
-    lines = [f"# {title}", ""]
-    count = 0
+def read_events_from_jsonl(log_path: str):
     with open(log_path) as f:
-        for raw_line in f:
-            e = json.loads(raw_line)
-            worth_telling = e["action"] == "DEATH" or e["tier"] == "lead"
-            if not worth_telling:
-                continue
-            text = describe(e)
-            if text is None:
-                continue
-            lines.append(text)
-            count += 1
+        for line in f:
+            yield json.loads(line)
+
+
+def read_events_from_postgres(postgres_url: str, run_id: str):
+    import psycopg2
+    import psycopg2.extras
+
+    conn = psycopg2.connect(postgres_url)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT tick, agent_id, tier, action, target, success, state_before, state_after, delta "
+                "FROM events WHERE run_id = %s ORDER BY tick",
+                (run_id,),
+            )
+            for row in cur:
+                yield dict(row)
+    finally:
+        conn.close()
+
+
+def read_scenes_from_postgres(postgres_url: str, run_id: str) -> list[tuple[int, str]]:
+    import psycopg2
+
+    conn = psycopg2.connect(postgres_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tick, text FROM narrative_scenes WHERE run_id = %s ORDER BY tick", (run_id,))
+            return [(tick, text) for tick, text in cur]
+    finally:
+        conn.close()
+
+
+def export(events_source, scenes: list[tuple[int, str]], out_path: str, title: str) -> int:
+    # Merge chronologically: at a shared tick, the scene reads as a
+    # reflection on what just happened, so it goes after the event lines.
+    entries: list[tuple[int, int, str]] = []  # (tick, sort_priority, line)
+    count = 0
+    for e in events_source:
+        worth_telling = e["action"] == "DEATH" or e["tier"] == "lead"
+        if not worth_telling:
+            continue
+        text = describe(e)
+        if text is None:
+            continue
+        entries.append((e["tick"], 0, text))
+        count += 1
+    for tick, text in scenes:
+        entries.append((tick, 1, f"> *{text}*"))
+        count += 1
+
+    entries.sort(key=lambda t: (t[0], t[1]))
+    lines = [f"# {title}", ""] + [line for _, _, line in entries]
     with open(out_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     return count
@@ -87,13 +138,27 @@ def export(log_path: str, out_path: str, title: str) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="seam - narrative exporter")
-    p.add_argument("--log-path", required=True)
+    p.add_argument("--log-path", default=None, help="v1-style JSONL log")
+    p.add_argument("--postgres-url", default=None, help="v2 alternative to --log-path, e.g. 'dbname=seam'")
+    p.add_argument("--run-id", default=None, help="required with --postgres-url")
     p.add_argument("--out", required=True)
     p.add_argument("--title", default="The Chronicle of Seam")
     args = p.parse_args()
 
-    count = export(args.log_path, args.out, args.title)
-    print(f"wrote {count} narrative lines to {args.out}")
+    if bool(args.log_path) == bool(args.postgres_url):
+        p.error("pass exactly one of --log-path or --postgres-url")
+    if args.postgres_url and not args.run_id:
+        p.error("--postgres-url requires --run-id")
+
+    if args.log_path:
+        events = read_events_from_jsonl(args.log_path)
+        scenes = []
+    else:
+        events = read_events_from_postgres(args.postgres_url, args.run_id)
+        scenes = read_scenes_from_postgres(args.postgres_url, args.run_id)
+
+    count = export(events, scenes, args.out, args.title)
+    print(f"wrote {count} narrative lines to {args.out} ({len(scenes)} of them real authored scenes)")
 
 
 if __name__ == "__main__":

@@ -182,13 +182,31 @@ proves worth continuing, and each has a concrete pass/fail check, not just
   live feed, same as v1's own "does it read well" for Phase 1. See `LOG.md`
   for the full account of what the hallucination looked like and why the
   fix worked.
-- **Phase 5 — Data layer + exporters.** Move logging to PostgreSQL, update
-  the three exporters to read the richer lead/crowd data (memory summaries,
-  settlement health, narrative scenes). Waypoint/other downstream integration
-  stays optional here, per the reuse principle — nothing about this phase
-  requires it. **Proof:** all three exporters run against a real v2 run and
-  produce output at least as useful as their v1 equivalents, now with the
-  new data available to query.
+- **Phase 5 — Data layer + exporters. DONE, 2026-07-16 — last phase.** Added
+  a lean four-table Postgres schema (`core-rs/schema.sql`): events (same
+  lead/death entries as JSONL, plus `specialty` - closing a real
+  documented v1 gap), lead memory, narrative scenes, settlement health, all
+  additive alongside the existing JSONL/CSV logging in `serve`
+  (`--postgres-url`/`--run-id`). All three exporters gained a Postgres mode
+  alongside their existing `--log-path` mode, verified to match v1 output
+  exactly in JSONL mode and to produce real, working output against a live
+  v2 run. `export_narrative.py` got a genuine upgrade: Phase 4's real
+  authored scenes now merge into the timeline at their actual tick,
+  alongside the templated event lines. `export_strategy.py` computes
+  specialization index directly from logged specialty now, instead of the
+  old paired-CSV workaround. **A real toolchain problem surfaced and got
+  fixed properly**: a modern Postgres crate needed Cargo's edition2024,
+  unsupported by the apt-installed Rust 1.75 from Phase 0 - rechecked
+  whether the original constraint (slow network, why rustup was skipped)
+  still held, found it didn't, and `rustup default stable` fixed both the
+  edition2024 problem and the unrelated broken `~/.cargo/bin/cargo` shim in
+  one move. See `LOG.md` for the full account. Waypoint/other downstream
+  integration was left optional throughout, per the reuse principle -
+  nothing about this phase required it.
+
+This is the last of the six planned phases. Full account of the whole
+build, phase by phase, including what was learned and what wasn't a
+straight line, in `LOG.md`.
 
 ## Open questions
 
