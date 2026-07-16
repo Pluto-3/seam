@@ -18,6 +18,12 @@
   .lead-meta { color: #8891a0; font-size: 0.8rem; margin: 0.15rem 0 0.5rem; }
   .lead-summary { color: #b7c2cf; font-size: 0.85rem; font-style: italic; margin-top: 0.4rem; }
   .lead-bias { color: #e0a96d; font-size: 0.78rem; margin-top: 0.4rem; }
+  .settlement { border: 1px solid #2a303a; background: #12151a; padding: 0.75rem 1rem; max-width: 420px; }
+  .hatch-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+  .hatch-actions button { background: #17222c; border-color: #2f4e66; }
+  .hatch-actions button:hover { background: #1f3242; }
+  .hatch-meta { color: #8891a0; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  #actionFeedback { color: #6ee7a8; font-size: 0.8rem; margin-top: 0.4rem; min-height: 1em; }
 </style>
 <h1>seam — CCTV view</h1>
 <p>status: <span id="status" class="disconnected">disconnected</span></p>
@@ -31,6 +37,14 @@
   <tr><td class="label">cumulative trades</td><td id="trades">-</td></tr>
   <tr><td class="label">specialization index</td><td id="specIdx">-</td></tr>
 </table>
+<h2>settlement</h2>
+<div class="settlement" id="settlement"></div>
+
+<h2>the hatch</h2>
+<div class="hatch-meta" id="hatchMeta"></div>
+<div class="hatch-actions" id="hatchActions"></div>
+<div id="actionFeedback"></div>
+
 <h2>leads</h2>
 <div class="leads" id="leads"></div>
 <div id="log"></div>
@@ -66,6 +80,23 @@
     }).join("");
   }
 
+  function renderSettlement(s) {
+    if (!s) return;
+    document.getElementById("settlement").innerHTML = `
+      <div>node: ${escapeHtml(s.node)}</div>
+      <div>population: ${s.population_alive} / ${s.roster_size}</div>
+      <div>avg energy: ${s.avg_energy.toFixed(1)}</div>
+      <div>avg hunger: ${s.avg_hunger.toFixed(1)}</div>
+      <div>food on hand: ${s.total_food_held.toFixed(1)}</div>
+    `;
+  }
+
+  function renderHatchMeta(h) {
+    const el = document.getElementById("hatchMeta");
+    if (!h) { el.textContent = "no hatch found"; return; }
+    el.textContent = `at ${h.location} | energy ${h.energy.toFixed(0)} | hunger ${h.hunger.toFixed(0)} | ${h.alive ? "alive" : "dead"}`;
+  }
+
   function render(snap) {
     document.getElementById("tick").textContent = snap.tick;
     document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
@@ -74,9 +105,44 @@
     document.getElementById("trades").textContent = snap.trades_cumulative;
     document.getElementById("specIdx").textContent = snap.specialization_index.toFixed(3);
     renderLeads(snap.leads);
+    renderSettlement(snap.settlement);
+    renderHatchMeta(snap.hatch);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");
+  }
+
+  async function refreshHatchActions() {
+    const container = document.getElementById("hatchActions");
+    try {
+      const resp = await fetch("/player/candidates");
+      if (!resp.ok) { container.textContent = "(no hatch)"; return; }
+      const candidates = await resp.json();
+      container.innerHTML = "";
+      for (const c of candidates) {
+        const btn = document.createElement("button");
+        btn.textContent = c.description;
+        btn.onclick = () => submitHatchAction(c.intent, c.description);
+        container.appendChild(btn);
+      }
+    } catch (e) {
+      container.textContent = "(disconnected from service)";
+    }
+  }
+
+  async function submitHatchAction(intent, description) {
+    const feedback = document.getElementById("actionFeedback");
+    try {
+      const resp = await fetch("/player/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(intent),
+      });
+      feedback.textContent = resp.ok ? `sent: ${description}` : `failed: ${resp.status}`;
+    } catch (e) {
+      feedback.textContent = "failed: could not reach service";
+    }
+    setTimeout(refreshHatchActions, 400); // let it land, then show fresh options
   }
 
   function connect() {
@@ -97,4 +163,6 @@
   document.getElementById("connectBtn").onclick = connect;
   document.getElementById("disconnectBtn").onclick = disconnect;
   connect();
+  refreshHatchActions();
+  setInterval(refreshHatchActions, 3000); // options change as the world moves, even between clicks
 </script>

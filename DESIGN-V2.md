@@ -143,12 +143,28 @@ proves worth continuing, and each has a concrete pass/fail check, not just
   consistent effect attributable specifically to the memory mechanism, not
   the larger effect originally expected. Reported at that size, not rounded
   up - see `LOG.md`.
-- **Phase 3 — Hatch: steward.** Bind the player to a specific settlement,
-  build the settlement health metric, wire up direct possession (ported from
-  v1) and standing orders for the player. **Proof:** one playtest where a
-  deliberately neglected settlement visibly declines, and one where active
-  stewardship visibly recovers or grows it — the stakes have to be real and
-  observable, not just present in code.
+- **Phase 3 — Hatch: steward. DONE, 2026-07-16.** Bound the player to a
+  settlement (one designated node + a fixed roster of 8 relocated crowd
+  agents, so an unlucky seed can never hand the player an empty one), built
+  the health metric as raw numbers (population, avg hunger/energy, food
+  held - no composite score, per the discussion beforehand), and added the
+  hatch - a new agent mechanically identical to a lead, except nothing
+  drives it automatically; it just waits for `POST /player/action`.
+  Standing orders needed no new code at all - the hatch issuing `SIGNAL
+  order:food` is the exact mechanic from Phase 0. **Proof:** took two real
+  attempts to get right, not a straight line - the first seed turned out to
+  be an "easy" world where the settlement thrived regardless of tending,
+  so switched to seed 19 (Phase 0's known hard case). Even then the first
+  comparison looked unconvincing until the full trajectory (not just
+  endpoints) was checked, which exposed two real bugs in the *test*
+  reasoning: the standing-order signal expires in 30 ticks and wasn't being
+  refreshed often enough, and it was being tried last instead of first when
+  it's the systemic lever. Fixed both and re-ran: neglected hits its
+  population floor by tick ~1028 and stays there; tended holds full
+  population until tick ~803 and doesn't reach that same floor until tick
+  ~3749 - over 3.5x longer. Real and substantial, more precisely described
+  as delaying/softening decline than "growth" - see `LOG.md` for the full
+  account, including why the first two attempts didn't show it.
 - **Phase 4 — Narrative generation.** Periodic scene-writing LLM calls
   reading across leads + the player's settlement, surfaced as a live feed in
   the viewer. **Proof:** a multi-hour run produces a feed a person would

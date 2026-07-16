@@ -24,7 +24,7 @@ use seam_core::decide::{generate_candidates, Intent};
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
 use seam_core::tick::run_tick;
-use seam_core::world::{generate_world, World};
+use seam_core::world::{generate_world, ResourceType, World};
 
 struct Args {
     agents: usize,
@@ -116,7 +116,12 @@ struct Snapshot {
     trades_cumulative: u64,
     uptime_secs: u64,
     leads: Vec<serde_json::Value>,
+    hatch: Option<serde_json::Value>,
+    settlement: serde_json::Value,
 }
+
+const HATCH_ID: &str = "hatch0";
+const SETTLEMENT_ROSTER_SIZE: usize = 8;
 
 struct SimState {
     world: World,
@@ -125,10 +130,16 @@ struct SimState {
     tick: i64,
     stats: StatsTracker,
     trade_enabled: bool,
-    // Populated by POST /leads/:id/intent; drained (one-shot) into run_tick's
-    // external_intents each tick - mirrors v1's "a lead with a fresh decision
-    // waiting uses it for exactly one tick" semantics.
-    pending_lead_intents: HashMap<String, Intent>,
+    // Phase 3: one designated node + a fixed roster of crowd agents who live
+    // there - the thing the player is actually responsible for. No new
+    // mechanic, just a label on an existing node and a fixed list of ids.
+    settlement_node: String,
+    settlement_roster: Vec<String>,
+    // Populated by POST /leads/:id/intent (the sidecar) or POST /player/action
+    // (the hatch, straight from the viewer) - drained (one-shot) into
+    // run_tick's external_intents each tick, mirrors v1's "a fresh decision
+    // waiting uses it for exactly one tick" semantics either way.
+    pending_intents: HashMap<String, Intent>,
     // Default: lead-tier + DEATH entries only, never the crowd's own
     // gather/move/rest noise - a long unattended run would otherwise burn
     // disk fast for data nobody's actually going to read (see LOG.md).
@@ -145,6 +156,27 @@ struct AppState {
     started_at: std::time::Instant,
 }
 
+/// Raw numbers only, deliberately no composite score - population, average
+/// hunger/energy of the settlement's own roster, and how much food they
+/// collectively have on hand right now. Nothing invented or weighted.
+fn build_settlement_view(sim: &SimState) -> serde_json::Value {
+    let roster: Vec<&AgentState> = sim.agents.iter().filter(|a| sim.settlement_roster.contains(&a.id)).collect();
+    let alive: Vec<&&AgentState> = roster.iter().filter(|a| a.alive).collect();
+    let population_alive = alive.len();
+    let roster_size = roster.len();
+    let avg_energy = if population_alive > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population_alive as f64 } else { 0.0 };
+    let avg_hunger = if population_alive > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population_alive as f64 } else { 0.0 };
+    let total_food_held: f64 = alive.iter().map(|a| a.held(ResourceType::Food)).sum();
+    serde_json::json!({
+        "node": sim.settlement_node,
+        "roster_size": roster_size,
+        "population_alive": population_alive,
+        "avg_energy": avg_energy,
+        "avg_hunger": avg_hunger,
+        "total_food_held": total_food_held,
+    })
+}
+
 fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
     let alive: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive).collect();
     let population = alive.len();
@@ -152,6 +184,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
     let avg_energy = if population > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population as f64 } else { 0.0 };
     let avg_hunger = if population > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population as f64 } else { 0.0 };
     let leads: Vec<serde_json::Value> = sim.agents.iter().filter(|a| a.tier == "lead").map(|a| a.public_view()).collect();
+    let hatch = sim.agents.iter().find(|a| a.id == HATCH_ID).map(|a| a.public_view());
     Snapshot {
         tick: sim.tick,
         population,
@@ -162,6 +195,8 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         trades_cumulative: sim.stats.cumulative_trades(),
         uptime_secs: started_at.elapsed().as_secs(),
         leads,
+        hatch,
+        settlement: build_settlement_view(sim),
     }
 }
 
@@ -173,6 +208,23 @@ async fn main() {
     let world = generate_world(a.nodes, &mut rng);
     let mut agents = seam_core::agents::spawn_agents(a.agents, &world, &mut rng);
     agents.extend(spawn_leads(&world, &mut rng));
+
+    // Phase 3: designate a settlement - one node, plus a fixed roster of
+    // crowd agents relocated there so it's guaranteed to actually have
+    // inhabitants (spawn_agents scatters them randomly; leaving this to
+    // chance could hand the player an empty settlement on an unlucky seed).
+    let settlement_node = world.node_order[0].clone();
+    let mut settlement_roster: Vec<String> = Vec::new();
+    for agent in agents.iter_mut().filter(|a| a.tier == "crowd").take(SETTLEMENT_ROSTER_SIZE) {
+        agent.location = settlement_node.clone();
+        settlement_roster.push(agent.id.clone());
+    }
+
+    // The hatch - one player-controlled agent, spawned at the settlement.
+    // Starting stats deliberately fixed, not randomized: it's a single
+    // special agent, not part of spawn_agents' statistical distribution.
+    let hatch_specialty = seam_core::world::RAW_RESOURCES[0];
+    agents.push(AgentState::new_player(HATCH_ID.to_string(), settlement_node.clone(), 80.0, 20.0, hatch_specialty));
 
     if let Some(path) = &a.log_path {
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -196,7 +248,9 @@ async fn main() {
         tick: 0,
         stats: StatsTracker::new(a.stats_csv.as_deref()),
         trade_enabled: !a.no_trade,
-        pending_lead_intents: HashMap::new(),
+        settlement_node,
+        settlement_roster,
+        pending_intents: HashMap::new(),
         log_writer: a.log_path.as_deref().map(JsonlWriter::new),
         full_log: a.full_log,
         stats_every_secs: a.stats_every_secs,
@@ -217,7 +271,7 @@ async fn main() {
                     sim.tick += 1;
                     let trade_enabled = sim.trade_enabled;
                     let tick = sim.tick;
-                    let due_intents = std::mem::take(&mut sim.pending_lead_intents);
+                    let due_intents = std::mem::take(&mut sim.pending_intents);
                     let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
 
@@ -252,6 +306,9 @@ async fn main() {
         .route("/leads/:id/intent", post(post_lead_intent))
         .route("/leads/:id/memory", post(post_lead_memory))
         .route("/agents/identities", post(post_agent_identities))
+        .route("/settlement", get(get_settlement))
+        .route("/player/candidates", get(get_player_candidates))
+        .route("/player/action", post(post_player_action))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", a.port);
@@ -393,7 +450,48 @@ async fn post_lead_intent(Path(id): Path<String>, State(state): State<Arc<AppSta
     if !sim.agents.iter().any(|a| a.id == id && a.tier == "lead") {
         return StatusCode::NOT_FOUND;
     }
-    sim.pending_lead_intents.insert(id, intent);
+    sim.pending_intents.insert(id, intent);
+    StatusCode::OK
+}
+
+async fn get_settlement(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sim = state.sim.lock().unwrap();
+    Json(build_settlement_view(&sim))
+}
+
+/// Same shape as GET /leads/:id/candidates, just fixed to the one hatch
+/// agent rather than taking a path id - there's only ever one hatch.
+async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    let sim = state.sim.lock().unwrap();
+    let hatch = sim.agents.iter().find(|a| a.id == HATCH_ID).ok_or(StatusCode::NOT_FOUND)?;
+    let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == hatch.location).collect();
+    let node_occupancy = compute_node_occupancy(&sim.agents);
+    let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
+
+    let out: Vec<serde_json::Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, (score, intent))| {
+            serde_json::json!({
+                "index": i + 1,
+                "description": describe_intent(intent),
+                "score": score,
+                "intent": intent,
+            })
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+/// The hatch's action, submitted straight from the viewer - no LLM in this
+/// path at all, this is direct possession. Same pending_intents mechanism
+/// leads use: applied for exactly the next tick the hatch is processed.
+async fn post_player_action(State(state): State<Arc<AppState>>, Json(intent): Json<Intent>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    if !sim.agents.iter().any(|a| a.id == HATCH_ID) {
+        return StatusCode::NOT_FOUND;
+    }
+    sim.pending_intents.insert(HATCH_ID.to_string(), intent);
     StatusCode::OK
 }
 

@@ -81,6 +81,16 @@ impl AgentState {
         a
     }
 
+    /// Phase 3: the hatch. Mechanically identical to any other agent - same
+    /// action set, same generate_candidates() - the only thing that makes it
+    /// "the player" is that nothing ever drives it automatically. It just
+    /// sits on crowd-style autopilot until a real POST /player/action arrives.
+    pub fn new_player(id: String, location: String, energy: f64, hunger: f64, specialty: ResourceType) -> Self {
+        let mut a = Self::new(id, location, energy, hunger, specialty);
+        a.tier = "player".to_string();
+        a
+    }
+
     pub fn record_trade_outcome(&mut self, success: bool) {
         self.recent_trades.push_back(success);
         while self.recent_trades.len() > MEMORY_WINDOW {
