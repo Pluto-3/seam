@@ -161,12 +161,27 @@ ones are proven worth continuing.
   tick. The shared-world bet paid off exactly as reasoned: real rivalry-by-
   contention emerged from mechanics that already existed, with no new code
   in the tick engine at all.
-- **Phase 1 — Player possession across societies.** Add the possession
-  pointer and `POST /player/possess/:society_id`; unpossessed hatches fall
-  back to the existing autopilot with no new code. **Proof:** switch
-  possession from society A to B mid-run; confirm A's hatch resumes
-  autopilot on the very next tick with no operator input, and B starts
-  responding to `POST /player/action`.
+- **Phase 1 — Player possession across societies. DONE, 2026-07-16.** Added
+  `SimState.possessed_society` (defaults to society 0, preserving Phase 0's
+  exact prior behavior) and `POST /player/possess/:society_id`, which 404s
+  on an unknown id and clears any stale `pending_intents` entry for the
+  *previous* hatch so a queued-but-not-yet-applied action can't leak onto
+  the old hatch after a switch. `get_player_candidates`/`post_player_action`
+  now resolve the current hatch via a small `possessed_hatch_id` helper
+  instead of a hardcoded constant — `DEFAULT_HATCH_ID` is gone. `Snapshot`
+  gained `possessed_society` (additive, for Phase 2's viewer to show
+  "currently yours" later). No changes to `decide.rs`/`tick.rs`/
+  `agents.rs`/`world.rs` — confirmed this phase was purely about *which*
+  hatch existing mechanisms point at. **Proof:** verified on a live `serve`
+  instance (slowed to `--tick-ms 500` specifically to make timing
+  unambiguous) — switched possession from society 0 to society 1, submitted
+  one `REST` action, and confirmed via the event log it landed on `hatch1`
+  on the exact next tick (tick 31, one after the tick read immediately
+  before posting); `hatch0` kept autopiloting continuously across the same
+  window (`SIGNAL`/`GATHER`/`REST`/`MOVE` on its own, zero operator input)
+  with no lag from losing possession. 404 on an unknown society id
+  confirmed not to mutate `possessed_society`. Existing headless `run`
+  binary's selftest still passes.
 - **Phase 2 — Viewer: society switcher + overview.** Add tab navigation and
   the comparative raw-numbers panel. **Proof:** switch between all N
   societies live, with no disconnect or restart — the same non-blocking

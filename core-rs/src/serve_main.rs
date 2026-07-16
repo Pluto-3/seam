@@ -138,15 +138,14 @@ struct Snapshot {
     uptime_secs: u64,
     leads: Vec<serde_json::Value>,
     societies: Vec<serde_json::Value>,
+    // v3 Phase 1: which society's hatch /player/action currently controls -
+    // purely additive so a future viewer can show "currently yours" vs.
+    // autopilot without a second round-trip.
+    possessed_society: String,
     narrative: Vec<serde_json::Value>,
     events: Vec<serde_json::Value>,
 }
 
-// v3 Phase 0: player possession (letting the operator choose which society's
-// hatch to control) is Phase 1's job, per DESIGN-V3.md - deliberately not
-// built yet. For now /player/action and /player/candidates stay pointed at
-// society 0's hatch specifically, a known, temporary limitation.
-const DEFAULT_HATCH_ID: &str = "hatch0";
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
 const NARRATIVE_FEED_CAP: usize = 20;
 const EVENTS_FEED_CAP: usize = 30;
@@ -173,6 +172,11 @@ struct SimState {
     // with its own home node, roster, and hatch - replaces the single
     // settlement_node/settlement_roster fields from v2 Phase 3.
     societies: Vec<Society>,
+    // v3 Phase 1: a single reassignable pointer, not N simultaneously-
+    // controlled hatches - defaults to societies[0].id at construction so
+    // today's exact behavior (society 0's hatch controllable) is unchanged
+    // until the operator actually switches via POST /player/possess/:id.
+    possessed_society: String,
     // Populated by POST /leads/:id/intent (the sidecar) or POST /player/action
     // (the hatch, straight from the viewer) - drained (one-shot) into
     // run_tick's external_intents each tick, mirrors v1's "a fresh decision
@@ -325,6 +329,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         uptime_secs: started_at.elapsed().as_secs(),
         leads,
         societies,
+        possessed_society: sim.possessed_society.clone(),
         narrative: sim.narrative_feed.iter().cloned().collect(),
         events: sim.notable_events.iter().cloned().collect(),
     }
@@ -408,6 +413,11 @@ async fn main() {
         }
     }
 
+    // v3 Phase 1: defaults to society 0 - preserves the exact pre-Phase-1
+    // behavior (society 0's hatch is the one /player/action controls) until
+    // the operator actually calls POST /player/possess/:society_id.
+    let possessed_society = societies[0].id.clone();
+
     let sim = SimState {
         world,
         agents,
@@ -416,6 +426,7 @@ async fn main() {
         stats: StatsTracker::new(a.stats_csv.as_deref()),
         trade_enabled: !a.no_trade,
         societies,
+        possessed_society,
         pending_intents: HashMap::new(),
         log_writer: a.log_path.as_deref().map(JsonlWriter::new),
         full_log: a.full_log,
@@ -578,6 +589,7 @@ async fn main() {
         .route("/societies", get(get_societies))
         .route("/player/candidates", get(get_player_candidates))
         .route("/player/action", post(post_player_action))
+        .route("/player/possess/:society_id", post(post_player_possess))
         .route("/narrative", get(get_narrative).post(post_narrative))
         .with_state(state);
 
@@ -742,12 +754,20 @@ async fn get_societies(State(state): State<Arc<AppState>>) -> Json<Vec<serde_jso
     Json(sim.societies.iter().map(|s| build_society_view(&sim, s)).collect())
 }
 
-/// Same shape as GET /leads/:id/candidates, fixed to society 0's hatch for
-/// now - v3 Phase 1 (player possession) is what lets the operator choose
-/// which society's hatch this actually controls; not built yet.
+/// v3 Phase 1: resolves whichever society is currently possessed to its
+/// hatch id - the one thing that changed about /player/candidates and
+/// /player/action, everything else about them is unchanged from Phase 0.
+fn possessed_hatch_id(sim: &SimState) -> Option<String> {
+    sim.societies.iter().find(|s| s.id == sim.possessed_society).map(|s| s.hatch_id.clone())
+}
+
+/// Same shape as GET /leads/:id/candidates, fixed to whichever society is
+/// currently possessed (see possessed_hatch_id) rather than one hardcoded
+/// hatch - POST /player/possess/:society_id is what changes that.
 async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
     let sim = state.sim.lock().unwrap();
-    let hatch = sim.agents.iter().find(|a| a.id == DEFAULT_HATCH_ID).ok_or(StatusCode::NOT_FOUND)?;
+    let hatch_id = possessed_hatch_id(&sim).ok_or(StatusCode::NOT_FOUND)?;
+    let hatch = sim.agents.iter().find(|a| a.id == hatch_id).ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == hatch.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
     let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
@@ -770,12 +790,34 @@ async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Jso
 /// The hatch's action, submitted straight from the viewer - no LLM in this
 /// path at all, this is direct possession. Same pending_intents mechanism
 /// leads use: applied for exactly the next tick the hatch is processed.
+/// Applies to whichever society is currently possessed, not a fixed hatch.
 async fn post_player_action(State(state): State<Arc<AppState>>, Json(intent): Json<Intent>) -> StatusCode {
     let mut sim = state.sim.lock().unwrap();
-    if !sim.agents.iter().any(|a| a.id == DEFAULT_HATCH_ID) {
+    let hatch_id = match possessed_hatch_id(&sim) {
+        Some(id) => id,
+        None => return StatusCode::NOT_FOUND,
+    };
+    sim.pending_intents.insert(hatch_id, intent);
+    StatusCode::OK
+}
+
+/// v3 Phase 1: switches which society's hatch /player/action and
+/// /player/candidates control. Clears any stale pending_intents entry for
+/// the *previous* possessed hatch first - without this, an action queued
+/// right before a switch would still apply to the old hatch one tick later,
+/// making "unpossessed hatches fall back to autopilot immediately" look
+/// like it has a one-tick lag. The old hatch needs no other change to
+/// resume autopilot: absence from pending_intents on its next tick is the
+/// same fallback guarantee leads already rely on.
+async fn post_player_possess(Path(society_id): Path<String>, State(state): State<Arc<AppState>>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    if !sim.societies.iter().any(|s| s.id == society_id) {
         return StatusCode::NOT_FOUND;
     }
-    sim.pending_intents.insert(DEFAULT_HATCH_ID.to_string(), intent);
+    if let Some(previous_hatch_id) = possessed_hatch_id(&sim) {
+        sim.pending_intents.remove(&previous_hatch_id);
+    }
+    sim.possessed_society = society_id;
     StatusCode::OK
 }
 
