@@ -206,13 +206,19 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
             lead_lines.append(f"- {l.get('display_name') or l['id']} has died.")
             continue
         note = f' They recently said: "{l["memory_summary"]}"' if l.get("memory_summary") else ""
+        # location is spelled out as "currently located at node X" rather than
+        # a bare "at X" - a small model reading "...(become the wealthiest
+        # trader), at n3..." kept misreading the node id as a wealth/status
+        # number, since it landed right next to wealth-flavored goal text.
+        # Caught by actually reading the narrative output, not assumed.
         lead_lines.append(
-            f"- {l.get('display_name') or l['id']} ({l['goal']}), at {l['location']}, "
-            f"energy {l['energy']:.0f}, hunger {l['hunger']:.0f}.{note}"
+            f"- {l.get('display_name') or l['id']}: goal is to {l['goal']}. "
+            f"Currently located at node {l['location']} (a place, not an amount). "
+            f"Energy {l['energy']:.0f}/100, hunger {l['hunger']:.0f}/100.{note}"
         )
 
     settlement_line = (
-        f"The settlement at {settlement['node']}: {settlement['population_alive']}/{settlement['roster_size']} "
+        f"The settlement at node {settlement['node']}: {settlement['population_alive']}/{settlement['roster_size']} "
         f"people, average hunger {settlement['avg_hunger']:.0f}, {settlement['total_food_held']:.0f} food on hand."
     )
 
@@ -223,11 +229,29 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
         "Write a two-sentence status report on the simulated economy below, using ONLY the "
         "facts given. Do not invent people, objects, professions, weather, or actions that "
         "aren't stated. Do not describe anyone gathering, cooking, or crafting unless it's "
-        "in the data. Just restate what the numbers and quotes below actually say, in plain "
-        "prose instead of a list. Present tense, third person, no preamble, no title.\n\n"
+        "in the data. Node ids (like n0, n3) are places, never amounts or scores - never "
+        "describe someone's wealth, rank, or status using a node id. Just restate what the "
+        "numbers and quotes below actually say, in plain prose instead of a list. If nothing "
+        "here differs meaningfully from what was last written, say so plainly instead of "
+        "repeating the same claim in new words. Present tense, third person, no preamble, "
+        "no title.\n\n"
         f"{context}\n{continuity}"
         "Status report:"
     )
+
+
+def _narrative_signature(leads: list[dict], settlement: dict) -> tuple:
+    """A coarse fingerprint of 'is there anything new to say' - rounded so
+    routine per-tick noise doesn't count as change, only asking Ollama to
+    write something when the picture has actually shifted."""
+    lead_sig = tuple(
+        (l["id"], l["alive"], l["location"], round(l["energy"] / 10), round(l["hunger"] / 10), l.get("memory_summary", ""))
+        for l in leads
+    )
+    settlement_sig = (
+        settlement["population_alive"], round(settlement["avg_hunger"] / 10), round(settlement["total_food_held"] / 20),
+    )
+    return (lead_sig, settlement_sig)
 
 
 def write_narrative_scene(client: ServiceClient, model: str, log: DecisionLog, previous: dict) -> None:
@@ -235,12 +259,22 @@ def write_narrative_scene(client: ServiceClient, model: str, log: DecisionLog, p
     settlement = client.get_settlement()
     if not leads or settlement is None:
         return
+
+    signature = _narrative_signature(leads, settlement)
+    if signature == previous.get("signature"):
+        # Nothing meaningfully different since the last scene - skip the
+        # call entirely rather than pay for (and inflict) another
+        # near-identical restatement of the same static fact.
+        log.record(kind="narrative", llm_answered=False, skipped_unchanged=True)
+        return
+
     response = query_ollama(build_narrative_prompt(leads, settlement, previous.get("text", "")), model=model)
     if not response:
         log.record(kind="narrative", llm_answered=False)
         return
     scene = " ".join(response.strip().split())[:500]
     client.post_narrative(scene)
+    previous["signature"] = signature
     previous["text"] = scene
     log.record(kind="narrative", llm_answered=True, scene=scene)
 
