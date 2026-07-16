@@ -189,6 +189,29 @@ pub fn spawn_leads(world: &World, rng: &mut impl Rng) -> Vec<AgentState> {
     leads
 }
 
+/// v3 Phase 0: one lead per society, starting at that society's home node
+/// instead of a random one - everything else (goal/personality assignment,
+/// specialty cycling, starting energy/hunger ranges) is identical to
+/// `spawn_leads` above, which stays unchanged for the headless `run` binary
+/// that has no concept of societies. `locations.len()` is expected to match
+/// `LEAD_GOALS.len()` (one lead per society, matching the default society
+/// count) - extra locations beyond `LEAD_GOALS.len()` are ignored, since
+/// there's no lead goal/personality to assign them yet.
+pub fn spawn_leads_at(locations: &[String], rng: &mut impl Rng) -> Vec<AgentState> {
+    let mut leads = Vec::with_capacity(locations.len().min(LEAD_GOALS.len()));
+    for (i, (goal, personality)) in LEAD_GOALS.iter().enumerate() {
+        let location = match locations.get(i) {
+            Some(loc) => loc.clone(),
+            None => break,
+        };
+        let specialty = RAW_RESOURCES[i % RAW_RESOURCES.len()];
+        let energy = rng.gen_range(C::START_ENERGY_MIN..=C::START_ENERGY_MAX);
+        let hunger = rng.gen_range(C::START_HUNGER_MIN..=C::START_HUNGER_MAX);
+        leads.push(AgentState::new_lead(format!("lead{i}"), location, energy, hunger, specialty, goal, personality));
+    }
+    leads
+}
+
 pub fn spawn_agents(num_agents: usize, world: &World, rng: &mut impl Rng) -> Vec<AgentState> {
     let node_ids = &world.node_order;
     let mut agents = Vec::with_capacity(num_agents);

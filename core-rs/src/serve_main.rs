@@ -19,7 +19,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use seam_core::agents::{spawn_leads, AgentState};
+use seam_core::agents::{spawn_leads_at, AgentState};
 use seam_core::decide::{generate_candidates, Intent};
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
@@ -39,6 +39,7 @@ struct Args {
     full_log: bool,
     postgres_url: Option<String>,
     run_id: Option<String>,
+    societies: usize,
 }
 
 fn parse_args() -> Args {
@@ -55,6 +56,10 @@ fn parse_args() -> Args {
         full_log: false,
         postgres_url: None,
         run_id: None,
+        // v3 Phase 0: matches LEAD_GOALS.len() so the default case gives
+        // every society exactly one lead with no new goals/personalities
+        // needed yet.
+        societies: 3,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -108,6 +113,10 @@ fn parse_args() -> Args {
                 a.run_id = Some(argv[i + 1].clone());
                 i += 2;
             }
+            "--societies" => {
+                a.societies = argv[i + 1].parse().expect("--societies must be an integer");
+                i += 2;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -128,16 +137,30 @@ struct Snapshot {
     trades_cumulative: u64,
     uptime_secs: u64,
     leads: Vec<serde_json::Value>,
-    hatch: Option<serde_json::Value>,
-    settlement: serde_json::Value,
+    societies: Vec<serde_json::Value>,
     narrative: Vec<serde_json::Value>,
     events: Vec<serde_json::Value>,
 }
 
-const HATCH_ID: &str = "hatch0";
+// v3 Phase 0: player possession (letting the operator choose which society's
+// hatch to control) is Phase 1's job, per DESIGN-V3.md - deliberately not
+// built yet. For now /player/action and /player/candidates stay pointed at
+// society 0's hatch specifically, a known, temporary limitation.
+const DEFAULT_HATCH_ID: &str = "hatch0";
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
 const NARRATIVE_FEED_CAP: usize = 20;
 const EVENTS_FEED_CAP: usize = 30;
+
+/// v3 Phase 0: one of these per society instead of one hardcoded settlement.
+/// Generalizes what Phase 3 (v2) built - a home node, a fixed roster of
+/// crowd agents, and (new) its own hatch - across N independent groups on
+/// the same shared world/graph rather than just one.
+struct Society {
+    id: String,
+    home_node: String,
+    roster: Vec<String>,
+    hatch_id: String,
+}
 
 struct SimState {
     world: World,
@@ -146,11 +169,10 @@ struct SimState {
     tick: i64,
     stats: StatsTracker,
     trade_enabled: bool,
-    // Phase 3: one designated node + a fixed roster of crowd agents who live
-    // there - the thing the player is actually responsible for. No new
-    // mechanic, just a label on an existing node and a fixed list of ids.
-    settlement_node: String,
-    settlement_roster: Vec<String>,
+    // v3 Phase 0: N independent societies on the same shared world, each
+    // with its own home node, roster, and hatch - replaces the single
+    // settlement_node/settlement_roster fields from v2 Phase 3.
+    societies: Vec<Society>,
     // Populated by POST /leads/:id/intent (the sidecar) or POST /player/action
     // (the hatch, straight from the viewer) - drained (one-shot) into
     // run_tick's external_intents each tick, mirrors v1's "a fresh decision
@@ -225,7 +247,7 @@ async fn persist_tick(
     tick: i64,
     events: Vec<PgEventRow>,
     lead_memory: Vec<PgLeadMemRow>,
-    settlement: Option<PgSettlementRow>,
+    settlements: Vec<PgSettlementRow>,
 ) {
     for e in events {
         let _ = pg.execute(
@@ -245,7 +267,11 @@ async fn persist_tick(
         ).await;
     }
 
-    if let Some(s) = settlement {
+    // v3 Phase 0: one row per society instead of one total - the schema's
+    // `node` column already differs per society so rows stay distinguishable
+    // without a schema change; a dedicated society-id column is left to
+    // whichever later phase actually needs to query per-society history.
+    for s in settlements {
         let _ = pg.execute(
             "INSERT INTO settlement_snapshots (run_id, tick, node, population_alive, roster_size, avg_energy, avg_hunger, total_food_held, ts)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -255,23 +281,28 @@ async fn persist_tick(
 }
 
 /// Raw numbers only, deliberately no composite score - population, average
-/// hunger/energy of the settlement's own roster, and how much food they
-/// collectively have on hand right now. Nothing invented or weighted.
-fn build_settlement_view(sim: &SimState) -> serde_json::Value {
-    let roster: Vec<&AgentState> = sim.agents.iter().filter(|a| sim.settlement_roster.contains(&a.id)).collect();
+/// hunger/energy of this one society's own roster, how much food they
+/// collectively have on hand, and its own hatch's state. Nothing invented
+/// or weighted. Same shape v2 Phase 3 used for the single settlement, now
+/// called once per society instead of once total.
+fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
+    let roster: Vec<&AgentState> = sim.agents.iter().filter(|a| society.roster.contains(&a.id)).collect();
     let alive: Vec<&&AgentState> = roster.iter().filter(|a| a.alive).collect();
     let population_alive = alive.len();
     let roster_size = roster.len();
     let avg_energy = if population_alive > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population_alive as f64 } else { 0.0 };
     let avg_hunger = if population_alive > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population_alive as f64 } else { 0.0 };
     let total_food_held: f64 = alive.iter().map(|a| a.held(ResourceType::Food)).sum();
+    let hatch = sim.agents.iter().find(|a| a.id == society.hatch_id).map(|a| a.public_view());
     serde_json::json!({
-        "node": sim.settlement_node,
+        "id": society.id,
+        "node": society.home_node,
         "roster_size": roster_size,
         "population_alive": population_alive,
         "avg_energy": avg_energy,
         "avg_hunger": avg_hunger,
         "total_food_held": total_food_held,
+        "hatch": hatch,
     })
 }
 
@@ -282,7 +313,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
     let avg_energy = if population > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population as f64 } else { 0.0 };
     let avg_hunger = if population > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population as f64 } else { 0.0 };
     let leads: Vec<serde_json::Value> = sim.agents.iter().filter(|a| a.tier == "lead").map(|a| a.public_view()).collect();
-    let hatch = sim.agents.iter().find(|a| a.id == HATCH_ID).map(|a| a.public_view());
+    let societies: Vec<serde_json::Value> = sim.societies.iter().map(|s| build_society_view(sim, s)).collect();
     Snapshot {
         tick: sim.tick,
         population,
@@ -293,8 +324,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         trades_cumulative: sim.stats.cumulative_trades(),
         uptime_secs: started_at.elapsed().as_secs(),
         leads,
-        hatch,
-        settlement: build_settlement_view(sim),
+        societies,
         narrative: sim.narrative_feed.iter().cloned().collect(),
         events: sim.notable_events.iter().cloned().collect(),
     }
@@ -307,24 +337,61 @@ async fn main() {
     let mut rng = ChaCha8Rng::seed_from_u64(a.seed);
     let world = generate_world(a.nodes, &mut rng);
     let mut agents = seam_core::agents::spawn_agents(a.agents, &world, &mut rng);
-    agents.extend(spawn_leads(&world, &mut rng));
 
-    // Phase 3: designate a settlement - one node, plus a fixed roster of
-    // crowd agents relocated there so it's guaranteed to actually have
-    // inhabitants (spawn_agents scatters them randomly; leaving this to
-    // chance could hand the player an empty settlement on an unlucky seed).
-    let settlement_node = world.node_order[0].clone();
-    let mut settlement_roster: Vec<String> = Vec::new();
-    for agent in agents.iter_mut().filter(|a| a.tier == "crowd").take(SETTLEMENT_ROSTER_SIZE) {
-        agent.location = settlement_node.clone();
-        settlement_roster.push(agent.id.clone());
+    // v3 Phase 0: N societies instead of one hardcoded settlement. Each gets
+    // a home node spread out by real graph hop-distance (not just index
+    // order in node_order, which could leave two societies right next to
+    // each other), a fixed roster of crowd agents relocated there so it's
+    // guaranteed to actually have inhabitants (same reasoning v2 Phase 3
+    // used for the single settlement), one lead starting there, and its own
+    // hatch.
+    let home_nodes = world.pick_spread_nodes(a.societies);
+    let mut lead_locations: Vec<String> = Vec::new();
+    let mut societies: Vec<Society> = Vec::new();
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (i, home_node) in home_nodes.iter().enumerate() {
+        let mut roster: Vec<String> = Vec::new();
+        for agent in agents
+            .iter_mut()
+            .filter(|a| a.tier == "crowd" && !claimed.contains(&a.id))
+            .take(SETTLEMENT_ROSTER_SIZE)
+        {
+            agent.location = home_node.clone();
+            roster.push(agent.id.clone());
+        }
+        for id in &roster {
+            claimed.insert(id.clone());
+        }
+        lead_locations.push(home_node.clone());
+
+        // The hatch - one player-controlled agent per society. Starting
+        // stats deliberately fixed, not randomized: same reasoning v2 Phase
+        // 3 used - it's a single special agent, not part of spawn_agents'
+        // statistical distribution.
+        let hatch_id = format!("hatch{i}");
+        let hatch_specialty = seam_core::world::RAW_RESOURCES[i % seam_core::world::RAW_RESOURCES.len()];
+        agents.push(AgentState::new_player(hatch_id.clone(), home_node.clone(), 80.0, 20.0, hatch_specialty));
+
+        societies.push(Society {
+            id: format!("society{i}"),
+            home_node: home_node.clone(),
+            roster,
+            hatch_id,
+        });
     }
 
-    // The hatch - one player-controlled agent, spawned at the settlement.
-    // Starting stats deliberately fixed, not randomized: it's a single
-    // special agent, not part of spawn_agents' statistical distribution.
-    let hatch_specialty = seam_core::world::RAW_RESOURCES[0];
-    agents.push(AgentState::new_player(HATCH_ID.to_string(), settlement_node.clone(), 80.0, 20.0, hatch_specialty));
+    // One lead per society, starting at that society's home node - only the
+    // first LEAD_GOALS.len() societies get a lead this way (matches the
+    // default society count exactly; a known limitation if --societies is
+    // ever raised past that without also adding more lead goals).
+    agents.extend(spawn_leads_at(&lead_locations, &mut rng));
+
+    println!(
+        "v3 Phase 0: spawned {} societies: {}",
+        societies.len(),
+        societies.iter().map(|s| format!("{}@{} (roster {})", s.id, s.home_node, s.roster.len())).collect::<Vec<_>>().join(", ")
+    );
 
     if let Some(path) = &a.log_path {
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -348,8 +415,7 @@ async fn main() {
         tick: 0,
         stats: StatsTracker::new(a.stats_csv.as_deref()),
         trade_enabled: !a.no_trade,
-        settlement_node,
-        settlement_roster,
+        societies,
         pending_intents: HashMap::new(),
         log_writer: a.log_path.as_deref().map(JsonlWriter::new),
         full_log: a.full_log,
@@ -389,7 +455,7 @@ async fn main() {
             loop {
                 let mut pg_events: Vec<PgEventRow> = Vec::new();
                 let mut pg_lead_memory: Vec<PgLeadMemRow> = Vec::new();
-                let mut pg_settlement: Option<PgSettlementRow> = None;
+                let mut pg_settlements: Vec<PgSettlementRow> = Vec::new();
 
                 let snap = {
                     let mut guard = state.sim.lock().unwrap();
@@ -412,7 +478,9 @@ async fn main() {
                             sim.notable_events.push_back(serde_json::json!({
                                 "tick": e.tick, "kind": "death", "agent_id": e.agent_id, "display_name": name,
                             }));
-                        } else if e.action == "SIGNAL" && (e.tier == "lead" || e.agent_id == HATCH_ID) {
+                        // "player" tier catches any society's hatch, not just one -
+                        // avoids hardcoding a single hatch id now that there are N.
+                        } else if e.action == "SIGNAL" && (e.tier == "lead" || e.tier == "player") {
                             if let Some(kind) = e.target.as_deref().and_then(|t| t.strip_prefix("order:")) {
                                 let location = e.state_after["location"].as_str().unwrap_or("").to_string();
                                 sim.notable_events.push_back(serde_json::json!({
@@ -470,15 +538,17 @@ async fn main() {
                                     hunger_scares_witnessed: lead.hunger_scares_witnessed as i32,
                                 });
                             }
-                            let sv = build_settlement_view(sim);
-                            pg_settlement = Some(PgSettlementRow {
-                                node: sv["node"].as_str().unwrap_or("").to_string(),
-                                population_alive: sv["population_alive"].as_i64().unwrap_or(0) as i32,
-                                roster_size: sv["roster_size"].as_i64().unwrap_or(0) as i32,
-                                avg_energy: sv["avg_energy"].as_f64().unwrap_or(0.0),
-                                avg_hunger: sv["avg_hunger"].as_f64().unwrap_or(0.0),
-                                total_food_held: sv["total_food_held"].as_f64().unwrap_or(0.0),
-                            });
+                            for society in &sim.societies {
+                                let sv = build_society_view(sim, society);
+                                pg_settlements.push(PgSettlementRow {
+                                    node: sv["node"].as_str().unwrap_or("").to_string(),
+                                    population_alive: sv["population_alive"].as_i64().unwrap_or(0) as i32,
+                                    roster_size: sv["roster_size"].as_i64().unwrap_or(0) as i32,
+                                    avg_energy: sv["avg_energy"].as_f64().unwrap_or(0.0),
+                                    avg_hunger: sv["avg_hunger"].as_f64().unwrap_or(0.0),
+                                    total_food_held: sv["total_food_held"].as_f64().unwrap_or(0.0),
+                                });
+                            }
                         }
                     }
 
@@ -487,7 +557,7 @@ async fn main() {
                 let _ = state.tx.send(snap.clone());
 
                 if let Some(pg) = &state.pg {
-                    persist_tick(pg, &state.run_id, snap.tick, pg_events, pg_lead_memory, pg_settlement).await;
+                    persist_tick(pg, &state.run_id, snap.tick, pg_events, pg_lead_memory, pg_settlements).await;
                 }
 
                 tokio::time::sleep(Duration::from_millis(tick_ms)).await;
@@ -505,14 +575,14 @@ async fn main() {
         .route("/leads/:id/intent", post(post_lead_intent))
         .route("/leads/:id/memory", post(post_lead_memory))
         .route("/agents/identities", post(post_agent_identities))
-        .route("/settlement", get(get_settlement))
+        .route("/societies", get(get_societies))
         .route("/player/candidates", get(get_player_candidates))
         .route("/player/action", post(post_player_action))
         .route("/narrative", get(get_narrative).post(post_narrative))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", a.port);
-    println!("seam service listening on http://{addr} (agents={} nodes={} seed={} tick_ms={})", a.agents, a.nodes, a.seed, a.tick_ms);
+    println!("seam service listening on http://{addr} (agents={} nodes={} seed={} tick_ms={} societies={})", a.agents, a.nodes, a.seed, a.tick_ms, a.societies);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("cannot bind port");
     axum::serve(listener, app).await.expect("server error");
 }
@@ -664,16 +734,20 @@ async fn post_lead_intent(Path(id): Path<String>, State(state): State<Arc<AppSta
     StatusCode::OK
 }
 
-async fn get_settlement(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+/// v3 Phase 0: replaces GET /settlement - one entry per society instead of
+/// a single object. Each entry includes its own hatch's state (see
+/// build_society_view), so there's no separate per-society hatch endpoint.
+async fn get_societies(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
     let sim = state.sim.lock().unwrap();
-    Json(build_settlement_view(&sim))
+    Json(sim.societies.iter().map(|s| build_society_view(&sim, s)).collect())
 }
 
-/// Same shape as GET /leads/:id/candidates, just fixed to the one hatch
-/// agent rather than taking a path id - there's only ever one hatch.
+/// Same shape as GET /leads/:id/candidates, fixed to society 0's hatch for
+/// now - v3 Phase 1 (player possession) is what lets the operator choose
+/// which society's hatch this actually controls; not built yet.
 async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
     let sim = state.sim.lock().unwrap();
-    let hatch = sim.agents.iter().find(|a| a.id == HATCH_ID).ok_or(StatusCode::NOT_FOUND)?;
+    let hatch = sim.agents.iter().find(|a| a.id == DEFAULT_HATCH_ID).ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == hatch.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
     let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
@@ -698,10 +772,10 @@ async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Jso
 /// leads use: applied for exactly the next tick the hatch is processed.
 async fn post_player_action(State(state): State<Arc<AppState>>, Json(intent): Json<Intent>) -> StatusCode {
     let mut sim = state.sim.lock().unwrap();
-    if !sim.agents.iter().any(|a| a.id == HATCH_ID) {
+    if !sim.agents.iter().any(|a| a.id == DEFAULT_HATCH_ID) {
         return StatusCode::NOT_FOUND;
     }
-    sim.pending_intents.insert(HATCH_ID.to_string(), intent);
+    sim.pending_intents.insert(DEFAULT_HATCH_ID.to_string(), intent);
     StatusCode::OK
 }
 

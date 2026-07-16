@@ -138,6 +138,71 @@ impl World {
         }
         seen.len() == self.nodes.len()
     }
+
+    /// Unweighted hop distance from `start` to every reachable node - shares
+    /// the same "hop count, not edge cost" precedent as
+    /// `decide.rs::bfs_next_hop_to_food`, just returning full distances
+    /// instead of a single first-hop.
+    fn bfs_distances(&self, start: &str) -> HashMap<String, usize> {
+        let mut dist: HashMap<String, usize> = HashMap::new();
+        dist.insert(start.to_string(), 0);
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        queue.push_back(start.to_string());
+        while let Some(current) = queue.pop_front() {
+            let d = dist[&current];
+            for edge in self.neighbors(&current) {
+                let nxt = edge.other(&current);
+                if !dist.contains_key(&nxt) {
+                    dist.insert(nxt.clone(), d + 1);
+                    queue.push_back(nxt);
+                }
+            }
+        }
+        dist
+    }
+
+    /// Greedy farthest-point sampling: picks `n` nodes that are spread out
+    /// from each other by real graph hop-distance, not just index order in
+    /// `node_order` - two societies placed by slicing node_order could end
+    /// up adjacent on the actual graph, quietly defeating the point of
+    /// separate home bases. Starts from `node_order[0]` for determinism
+    /// (same RNG-seeded world always yields the same society placement),
+    /// then repeatedly adds whichever remaining node has the largest
+    /// *minimum* distance to any node already chosen.
+    pub fn pick_spread_nodes(&self, n: usize) -> Vec<String> {
+        if n == 0 || self.node_order.is_empty() {
+            return Vec::new();
+        }
+        let mut chosen = vec![self.node_order[0].clone()];
+        while chosen.len() < n && chosen.len() < self.node_order.len() {
+            let mut best_node: Option<String> = None;
+            let mut best_min_dist: i64 = -1;
+            for candidate in &self.node_order {
+                if chosen.contains(candidate) {
+                    continue;
+                }
+                let min_dist = chosen
+                    .iter()
+                    .map(|c| {
+                        self.bfs_distances(c)
+                            .get(candidate)
+                            .copied()
+                            .unwrap_or(usize::MAX) as i64
+                    })
+                    .min()
+                    .unwrap_or(0);
+                if min_dist > best_min_dist {
+                    best_min_dist = min_dist;
+                    best_node = Some(candidate.clone());
+                }
+            }
+            match best_node {
+                Some(node) => chosen.push(node),
+                None => break,
+            }
+        }
+        chosen
+    }
 }
 
 pub fn generate_world(num_nodes: usize, rng: &mut impl Rng) -> World {
@@ -191,4 +256,35 @@ pub fn generate_world(num_nodes: usize, rng: &mut impl Rng) -> World {
     }
 
     world
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    /// v3 Phase 0: pick_spread_nodes exists specifically so N societies don't
+    /// start out clustered together (which would quietly defeat Phase 3's
+    /// rivalry-by-contention test later). Checked against the actual default
+    /// seed/node-count `serve` uses, not a hand-picked easy case.
+    #[test]
+    fn pick_spread_nodes_are_not_adjacent() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let world = generate_world(15, &mut rng);
+        let picks = world.pick_spread_nodes(3);
+        assert_eq!(picks.len(), 3, "expected 3 distinct home nodes");
+
+        for i in 0..picks.len() {
+            for j in (i + 1)..picks.len() {
+                let dist = world.bfs_distances(&picks[i]);
+                let d = *dist.get(&picks[j]).expect("world is connected, every node reachable");
+                assert!(
+                    d >= 2,
+                    "societies at {} and {} are adjacent (hop distance {}), defeats the point of separate home nodes",
+                    picks[i], picks[j], d
+                );
+            }
+        }
+    }
 }
