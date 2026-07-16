@@ -211,9 +211,18 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
         # trader), at n3..." kept misreading the node id as a wealth/status
         # number, since it landed right next to wealth-flavored goal text.
         # Caught by actually reading the narrative output, not assumed.
+        #
+        # The "(a place, not an amount)" aside used to live right here, next
+        # to the value itself - found later (checking 400+ real scenes, not
+        # just the first few) that the model sometimes echoed the aside
+        # verbatim into its output ("node n7 (a place)"). Moved the
+        # clarification to the general instructions below instead, stated
+        # once, not repeated per lead - it's held for hundreds of scenes
+        # without the original wealth-confusion bug recurring, so the
+        # per-line reminder wasn't doing anything the general one wasn't.
         lead_lines.append(
             f"- {l.get('display_name') or l['id']}: goal is to {l['goal']}. "
-            f"Currently located at node {l['location']} (a place, not an amount). "
+            f"Currently located at node {l['location']}. "
             f"Energy {l['energy']:.0f}/100, hunger {l['hunger']:.0f}/100.{note}"
         )
 
@@ -223,18 +232,28 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
     )
 
     context = "\n".join(["Leads:"] + lead_lines + ["", settlement_line])
-    continuity = f'\nThe last thing written about this world was: "{previous_scene}"\n' if previous_scene else ""
+    # Framed as background tone only, not something to respond to or compare
+    # against - the garbled "not at that place; according to the previous
+    # statement..." sentences found by reading 400+ real scenes came from
+    # the model trying to explicitly contrast current vs. previous, so this
+    # is deliberately worded to discourage that rather than invite it.
+    continuity = (
+        f'\n(For tone only, not to be quoted or compared against: the previous scene said '
+        f'"{previous_scene}")\n'
+    ) if previous_scene else ""
 
     return (
         "Write a two-sentence status report on the simulated economy below, using ONLY the "
         "facts given. Do not invent people, objects, professions, weather, or actions that "
         "aren't stated. Do not describe anyone gathering, cooking, or crafting unless it's "
         "in the data. Node ids (like n0, n3) are places, never amounts or scores - never "
-        "describe someone's wealth, rank, or status using a node id. Just restate what the "
-        "numbers and quotes below actually say, in plain prose instead of a list. If nothing "
-        "here differs meaningfully from what was last written, say so plainly instead of "
-        "repeating the same claim in new words. Present tense, third person, no preamble, "
-        "no title.\n\n"
+        "describe someone's wealth, rank, or status using a node id, and never use the word "
+        "'place' when naming one. Just restate what the numbers and quotes below actually "
+        "say, in plain prose instead of a list. Describe the CURRENT situation only - do not "
+        "compare it to, contrast it with, or refer back to what was written last time. If the "
+        "current situation happens to be steady or unremarkable, just say things are steady, "
+        "in one plain sentence, instead of describing every number. Present tense, third "
+        "person, no preamble, no title.\n\n"
         f"{context}\n{continuity}"
         "Status report:"
     )
