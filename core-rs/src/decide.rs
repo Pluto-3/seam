@@ -273,6 +273,28 @@ pub fn generate_candidates(
                 candidates.push((C::SIGNAL_VALUE, intent));
             }
         }
+
+        // Standing orders: a leadership-only lever (order_multiplier in this
+        // same file already reads these to bias crowd gathering) that was
+        // never actually reachable through here - the only code path that
+        // ever produced one was a manually-constructed Intent posted straight
+        // through the hatch's override endpoint. Checked the real decision
+        // logs across every run so far: every single SIGNAL a lead ever
+        // chose was scarce:/rich:, never order: - not because leads decided
+        // against it, but because it was never on the menu. Scored by local
+        // urgency (scarcer stock -> more worth ordering) so it's a real
+        // contender alongside trade/gather/craft, not a token option nobody
+        // would rationally pick.
+        if agent.tier == "lead" || agent.tier == "player" {
+            let order_kind = format!("order:{}", rt.as_str());
+            if can_signal(agent, node, &order_kind, tick) {
+                let urgency = (1.0 - ratio).clamp(0.0, 1.0);
+                let mut intent = Intent::new("SIGNAL");
+                intent.target = Some(node.id.clone());
+                intent.resource = Some(order_kind);
+                candidates.push((C::SIGNAL_VALUE * (0.5 + urgency), intent));
+            }
+        }
     }
 
     // Move: 1-hop lookahead, discounted by edge cost, nudged by signals at the
