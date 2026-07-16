@@ -300,14 +300,19 @@ def assign_lead_identities(client: ServiceClient, model: str) -> None:
     this is just a fitting first name, not a full identity - one small
     batched call. Fixes a real gap: the crowd got named at startup from the
     start, leads never did, even though Phase 2's design intent covered
-    both."""
+    both. Deliberately silly rather than a serious fantasy name - a small
+    settlement's over-earnest wealthiest trader having a name like
+    "Reginald Sneezeypants III" is funnier than it being self-serious about
+    it, and there's no reason a dev tool's names need to be dignified."""
     leads = client.get_leads()
     unnamed = [l for l in leads if not l.get("display_name")]
     if not unnamed:
         return
     prompt = (
-        "Invent a short first name fitting each character below, given their goal and "
-        "personality. Reply with exactly one line per id, in this exact format, no other text:\n"
+        "Invent a ridiculous, absurd Rick-and-Morty-style name for each character below - "
+        "deadpan, irreverent, silly, the kind of name that clashes with how self-serious they "
+        "are about their goal. Not a normal fantasy name. Reply with exactly one line per id, "
+        "in this exact format, no other text:\n"
         + "\n".join(f"{l['id']}: <Name>  (goal: {l['goal']}, personality: {l['personality']})" for l in unnamed)
     )
     response = query_ollama(prompt, model=model)
