@@ -153,14 +153,28 @@ ones are proven worth continuing.
   `settlement`/`hatch` fields that no longer exist — its settlement/hatch
   panels won't work again until Phase 2. `/player/action` and
   `/player/candidates` still hardcode society 0's hatch — Phase 1's job, not
-  built yet. **Proof:** ran `serve` for a real stretch (1,783 ticks, 40
-  agents, 3 societies at `n0`/`n5`/`n7`) with full logging and checked the
-  actual event log rather than asserting the mechanic works — found 22,894
-  cross-society TRADE attempts (16,934 successful) and 21,973 real instances
-  of two different societies' agents occupying the same node in the same
-  tick. The shared-world bet paid off exactly as reasoned: real rivalry-by-
-  contention emerged from mechanics that already existed, with no new code
-  in the tick engine at all.
+  built yet. **Proof:** ran `serve` for a real stretch with full logging and
+  checked the actual event log rather than asserting the mechanic works —
+  found real cross-society TRADE attempts and real instances of two
+  different societies' agents occupying the same node in the same tick. The
+  shared-world bet paid off exactly as reasoned: real rivalry-by-contention
+  emerged from mechanics that already existed, with no new code in the tick
+  engine at all. **Correction, made during Phase 3 (2026-07-16):** the
+  original figures quoted here (22,894/36,201 cross-society trades, ~63%)
+  were computed with ad hoc interactive Python against a log file that was
+  still growing in the background mid-analysis — the trade-count denominator
+  and the cross-society numerator ended up read from different moments of
+  the same live-appending file, not one consistent snapshot, and the
+  "1,783 ticks" scope quoted alongside them belonged to an even earlier read.
+  Rebuilding the same check as a real, rerunnable script
+  (`analyze_cross_society.py`) against a properly frozen slice of that same
+  run found the actual cross-society trade rate is **~28-32%**, not 63% —
+  still a real, substantial finding (roughly a third of all trading was
+  already happening across society lines with zero purpose-built rivalry
+  mechanic), just meaningfully smaller than first reported. Left uncorrected
+  here until Phase 3 caught it precisely because there was no script to
+  rerun — exactly the gap Phase 3 was scoped to close. See Phase 3's entry
+  below for the corrected, reproducible numbers.
 - **Phase 1 — Player possession across societies. DONE, 2026-07-16.** Added
   `SimState.possessed_society` (defaults to society 0, preserving Phase 0's
   exact prior behavior) and `POST /player/possess/:society_id`, which 404s
@@ -209,14 +223,58 @@ ones are proven worth continuing.
   correctly showed only `lead1` (not all three), and `/player/candidates`
   returned real candidates for the new hatch. Zero JS console errors across
   both loads. Existing headless `run` selftest still passes.
-- **Phase 3 — Implicit rivalry stress test.** Run N societies for a real
-  stretch (same discipline as the three parallel hard-seed experiments
-  already run post-v2), specifically checking whether shared-node
-  contention and cross-society trade produce a noticeably more watchable
-  dynamic than N independent single-settlement worlds would. This phase's
-  result decides whether an explicit rivalry mechanic is worth building at
-  all — an honest human judgment call, flagged as such up front, the same
-  way v2 Phase 4's narrative quality was.
+- **Phase 3 — Implicit rivalry stress test. DONE, 2026-07-16.** Not a code
+  build (aside from one new script) — an experiment deciding whether
+  implicit contention is enough, or whether an explicit rivalry mechanic
+  needs building on top of it. **New reusable tool**: `analyze_cross_
+  society.py` (repo root), since no existing script computed a
+  cross-society metric — the Phase 0 numbers had been an uncommitted,
+  ad hoc pass. Society membership is reconstructed by identity, not
+  cluster size: a hatch/lead's location is never random (deliberately
+  spawned at its society's home node), so real home nodes are wherever a
+  `hatch*`/`lead*` id's earliest location is — a size-based cutoff was
+  tried first and failed a real test (an isolated-baseline run's larger
+  free-roaming crowd pool produced random spawn-collisions big enough to
+  misread as a phantom second society), caught by testing against real
+  data before trusting it, not assumed safe.
+  **A real correction fell out of building this properly**: the original
+  Phase 0 headline (22,894/36,201 ≈ 63% cross-society trades) turned out to
+  be computed against a log that was still growing mid-analysis — numerator
+  and denominator weren't actually one consistent snapshot. Corrected in
+  Phase 0's own entry above; the real, reproducible rate is ~28-32%, still
+  substantial.
+  **Six varied runs** (3 shared-world at `--societies 3`, 3 matched
+  isolated-baseline at `--societies 1`, each pair at the same seed/node
+  count — seed 42/15 nodes, seed 19/15 nodes [harsher economy, 88.3% gather
+  fail], seed 31/25 nodes), ~5,000-5,200 ticks each, logs frozen (processes
+  stopped) before analysis specifically to avoid repeating the mid-growth
+  measurement mistake. **Quantitative result, held up across all three
+  varied configs, not just one**: 29.2-31.9% of all trades and 45.8-59.6%
+  of node-occupancy groups were cross-society in every shared-world run;
+  structurally exactly 0% in every isolated-baseline run, as expected by
+  construction. **Qualitative result, read from real log entries, not
+  inferred from percentages**: cross-society trades appear from as early
+  as tick 4 and recur steadily throughout a run, not a rare fluke — and in
+  the harshest-economy seed, all three of that run's deaths happened at the
+  same single contested node (`n13`), with all three societies' leads and
+  two of three hatches simultaneously present at that tick. That's a real,
+  narratively rich moment (a genuine three-way convergence under scarcity
+  pressure) that emerged with zero purpose-built rivalry code.
+  **Honest caveat, stated rather than glossed over**: the isolated
+  baseline's structural 0% is airtight (no second society exists to trade
+  or contend with, full stop), but it always gets only `lead0`'s
+  "wealthiest trader" personality, never a fair sample of all three — not
+  a confound for the cross-society-rate metric itself (which is 0 by
+  construction regardless of which lead is present), but worth remembering
+  if this baseline is ever reused to compare behavioral variety instead.
+  **Verdict**: implicit contention is enough for now. It's frequent,
+  consistent across varied seeds/topologies, and produces at least one
+  genuinely dramatic real moment without any explicit rivalry mechanic
+  built. Recommendation: proceed to Phase 4 (surface what's already
+  happening) rather than build formal alliances/hostility on spec — revisit
+  explicit rivalry only if Phase 4's highlight extraction finds the
+  implicit version starts feeling repetitive over much longer stretches, a
+  genuinely open follow-up question this one experiment doesn't resolve.
 - **Phase 4 — Highlight extraction.** Build the cross-society-signal filter
   over the existing event log; surface it as a feed or export, following
   the exact non-blocking, read-only-filter posture the three existing
@@ -234,9 +292,12 @@ None blocking Phase 0. Still genuinely open, deferred on purpose:
   collapse behavior. Whether that should mean something more (real
   dissolution, absorption into a neighboring society) is deferred until the
   fixed-N core is actually running and there's something real to observe.
-- **Explicit rivalry mechanics** (formal alliances, claims, war). Only a
-  real candidate if Phase 3 finds implicit contention too quiet to be
-  interesting.
+- **Explicit rivalry mechanics** (formal alliances, claims, war). Phase 3
+  answered this for now: implicit contention holds up across varied seeds/
+  topologies and produced at least one genuinely dramatic moment with zero
+  purpose-built code, so this stays deferred — a real candidate only if
+  Phase 4's highlight extraction later finds the implicit version starts
+  feeling repetitive over much longer stretches than Phase 3 tested.
 - **How many societies, eventually, and does the graph need to grow to fit
   them.** Same "how far does the real-ass-world scale ambition go" posture
   v2 left deferred — not a v3 build target, just something the design
