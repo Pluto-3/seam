@@ -131,11 +131,13 @@ struct Snapshot {
     hatch: Option<serde_json::Value>,
     settlement: serde_json::Value,
     narrative: Vec<serde_json::Value>,
+    events: Vec<serde_json::Value>,
 }
 
 const HATCH_ID: &str = "hatch0";
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
 const NARRATIVE_FEED_CAP: usize = 20;
+const EVENTS_FEED_CAP: usize = 30;
 
 struct SimState {
     world: World,
@@ -167,6 +169,10 @@ struct SimState {
     // been written so far for the viewer and for the sidecar's own next
     // prompt (continuity between scenes).
     narrative_feed: std::collections::VecDeque<serde_json::Value>,
+    // Deaths and standing orders were previously invisible in the live view -
+    // only inferable from population silently dropping. A terse rolling feed,
+    // built straight from each tick's own entries, no separate bookkeeping.
+    notable_events: std::collections::VecDeque<serde_json::Value>,
 }
 
 struct AppState {
@@ -290,6 +296,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         hatch,
         settlement: build_settlement_view(sim),
         narrative: sim.narrative_feed.iter().cloned().collect(),
+        events: sim.notable_events.iter().cloned().collect(),
     }
 }
 
@@ -349,6 +356,7 @@ async fn main() {
         stats_every_secs: a.stats_every_secs,
         last_stats_write: std::time::Instant::now(),
         narrative_feed: std::collections::VecDeque::new(),
+        notable_events: std::collections::VecDeque::new(),
     };
 
     let run_id = a.run_id.clone().unwrap_or_else(|| {
@@ -392,6 +400,31 @@ async fn main() {
                     let due_intents = std::mem::take(&mut sim.pending_intents);
                     let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
+
+                    // Deaths and standing orders were previously invisible in the
+                    // live view - only inferable from population silently
+                    // dropping a number. Built straight from this tick's own
+                    // entries, no separate bookkeeping needed.
+                    for e in &entries {
+                        let name = sim.agents.iter().find(|a| a.id == e.agent_id)
+                            .and_then(|a| a.display_name.clone()).unwrap_or_else(|| e.agent_id.clone());
+                        if e.action == "DEATH" {
+                            sim.notable_events.push_back(serde_json::json!({
+                                "tick": e.tick, "kind": "death", "agent_id": e.agent_id, "display_name": name,
+                            }));
+                        } else if e.action == "SIGNAL" && (e.tier == "lead" || e.agent_id == HATCH_ID) {
+                            if let Some(kind) = e.target.as_deref().and_then(|t| t.strip_prefix("order:")) {
+                                let location = e.state_after["location"].as_str().unwrap_or("").to_string();
+                                sim.notable_events.push_back(serde_json::json!({
+                                    "tick": e.tick, "kind": "order", "agent_id": e.agent_id, "display_name": name,
+                                    "resource": kind, "location": location,
+                                }));
+                            }
+                        }
+                    }
+                    while sim.notable_events.len() > EVENTS_FEED_CAP {
+                        sim.notable_events.pop_front();
+                    }
 
                     let full_log = sim.full_log;
                     let keep = |e: &seam_core::log::TickLogEntry| full_log || e.tier == "lead" || e.action == "DEATH";
@@ -489,8 +522,15 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<Snapshot> {
     Json(build_snapshot(&sim, state.started_at))
 }
 
-async fn index_page() -> Html<&'static str> {
-    Html(include_str!("../viewer/index.html"))
+/// Read from disk on every request rather than baked in at compile time -
+/// so the viewer can be edited and reloaded in a browser tab without
+/// restarting the (possibly hours-old, accumulating) simulation underneath
+/// it. Falls back to the embedded copy if the file's missing (e.g. running
+/// the binary from somewhere other than core-rs/).
+async fn index_page() -> Html<String> {
+    const FALLBACK: &str = include_str!("../viewer/index.html");
+    let html = std::fs::read_to_string("viewer/index.html").unwrap_or_else(|_| FALLBACK.to_string());
+    Html(html)
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -569,7 +609,10 @@ async fn get_agents(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::
     let out: Vec<serde_json::Value> = sim
         .agents
         .iter()
-        .map(|a| serde_json::json!({"id": a.id, "tier": a.tier, "display_name": a.display_name}))
+        .map(|a| serde_json::json!({
+            "id": a.id, "tier": a.tier, "display_name": a.display_name,
+            "specialty": a.specialty.as_str(), "alive": a.alive,
+        }))
         .collect();
     Json(out)
 }

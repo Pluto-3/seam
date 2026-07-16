@@ -1,138 +1,398 @@
-<title>seam — live monitor</title>
+<title>seam — observation deck</title>
 <style>
-  body { font-family: ui-monospace, monospace; background: #0b0d10; color: #d8dee4; margin: 2rem; }
-  h1 { font-size: 1.1rem; color: #8fd3ff; }
-  #status { font-weight: bold; }
-  #status.connected { color: #6ee7a8; }
-  #status.disconnected { color: #ff8080; }
-  table { border-collapse: collapse; margin-top: 1rem; }
-  td { padding: 0.15rem 1rem 0.15rem 0; }
-  td.label { color: #8891a0; }
-  button { font-family: inherit; background: #1a1e24; color: #d8dee4; border: 1px solid #3a4150; padding: 0.4rem 0.8rem; margin-right: 0.5rem; cursor: pointer; }
-  button:hover { background: #262c35; }
-  #log { margin-top: 1.5rem; white-space: pre; color: #6a7280; font-size: 0.85rem; max-height: 220px; overflow-y: auto; border-top: 1px solid #262c35; padding-top: 0.5rem; }
-  h2 { font-size: 0.95rem; color: #8fd3ff; margin-top: 2rem; border-top: 1px solid #262c35; padding-top: 1rem; }
-  .leads { display: flex; flex-wrap: wrap; gap: 1rem; }
-  .lead-card { border: 1px solid #2a303a; background: #12151a; padding: 0.75rem 1rem; width: 280px; }
-  .lead-name { color: #d8dee4; font-weight: bold; }
-  .lead-meta { color: #8891a0; font-size: 0.8rem; margin: 0.15rem 0 0.5rem; }
-  .lead-summary { color: #b7c2cf; font-size: 0.85rem; font-style: italic; margin-top: 0.4rem; }
-  .lead-bias { color: #e0a96d; font-size: 0.78rem; margin-top: 0.4rem; }
-  .settlement { border: 1px solid #2a303a; background: #12151a; padding: 0.75rem 1rem; max-width: 420px; }
-  .hatch-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
-  .hatch-actions button { background: #17222c; border-color: #2f4e66; }
-  .hatch-actions button:hover { background: #1f3242; }
-  .hatch-meta { color: #8891a0; font-size: 0.85rem; margin-bottom: 0.5rem; }
-  #actionFeedback { color: #6ee7a8; font-size: 0.8rem; margin-top: 0.4rem; min-height: 1em; }
-  #narrative { max-width: 620px; }
-  .scene { border-left: 2px solid #2f4e66; padding: 0.5rem 0 0.5rem 0.8rem; margin-bottom: 0.6rem; }
-  .scene-tick { color: #6a7280; font-size: 0.75rem; margin-bottom: 0.2rem; }
-  .scene-text { color: #d8dee4; font-size: 0.92rem; line-height: 1.4; }
-</style>
-<h1>seam — CCTV view</h1>
-<p>status: <span id="status" class="disconnected">disconnected</span></p>
-<button id="connectBtn">connect</button>
-<button id="disconnectBtn">disconnect</button>
-<table>
-  <tr><td class="label">tick</td><td id="tick">-</td></tr>
-  <tr><td class="label">population</td><td id="population">-</td></tr>
-  <tr><td class="label">avg energy</td><td id="avgEnergy">-</td></tr>
-  <tr><td class="label">avg hunger</td><td id="avgHunger">-</td></tr>
-  <tr><td class="label">cumulative trades</td><td id="trades">-</td></tr>
-  <tr><td class="label">specialization index</td><td id="specIdx">-</td></tr>
-</table>
-<h2>what's happening</h2>
-<div id="narrative"></div>
-<h2>settlement</h2>
-<div class="settlement" id="settlement"></div>
+  :root {
+    --bg: #0a0c10;
+    --panel: #12151b;
+    --panel-alt: #171b23;
+    --border: #232a35;
+    --text: #d9dee6;
+    --text-muted: #7c8695;
+    --text-faint: #4d5563;
+    --data: #8fd3ff;
+    --vitality: #d9a860;
+    --alert: #c1685a;
+    --narrative-ink: #e9e3d4;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+  }
 
-<h2>the hatch</h2>
-<div class="hatch-meta" id="hatchMeta"></div>
-<div class="hatch-actions" id="hatchActions"></div>
-<div id="actionFeedback"></div>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body { font-family: var(--mono); font-size: 14px; line-height: 1.5; padding: 1.5rem; max-width: 1180px; margin: 0 auto; }
+
+  a { color: var(--data); }
+  button {
+    font-family: var(--mono); font-size: 0.85rem; background: var(--panel-alt); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px; padding: 0.45rem 0.85rem; cursor: pointer;
+  }
+  button:hover { background: #1d2530; border-color: #34506b; }
+  button:focus-visible { outline: 2px solid var(--data); outline-offset: 1px; }
+
+  /* ---------- masthead ---------- */
+  .masthead { border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+  .masthead-top { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+  .masthead-title { font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin: 0; }
+  .masthead-title strong { color: var(--data); }
+  .masthead-stats { display: flex; gap: 1.5rem; font-size: 0.85rem; color: var(--text-muted); flex-wrap: wrap; }
+  .masthead-stats b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 0.4rem; position: relative; top: -1px; }
+  .dot.up { background: #6ee7a8; }
+  .dot.down { background: var(--alert); }
+  @media (prefers-reduced-motion: no-preference) {
+    .dot.up { animation: pulse 2.4s ease-in-out infinite; }
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .vitals { margin-top: 0.9rem; }
+  .vitals svg { width: 100%; height: 46px; display: block; }
+  .vitals-legend { display: flex; gap: 1.2rem; font-size: 0.72rem; color: var(--text-faint); margin-top: 0.3rem; }
+  .vitals-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .swatch { width: 10px; height: 2px; display: inline-block; }
+
+  .controls { margin-top: 0.75rem; display: flex; gap: 0.5rem; }
+
+  /* ---------- section scaffolding ---------- */
+  h2 {
+    font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-faint); margin: 2.2rem 0 0.75rem; font-weight: 600;
+  }
+  h2:first-of-type { margin-top: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 1rem 1.1rem; }
+
+  /* ---------- two-column: narrative | settlement+hatch ---------- */
+  .main-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 1.25rem; align-items: start; }
+  @media (max-width: 860px) { .main-grid { grid-template-columns: 1fr; } }
+
+  .narrative-panel { max-height: 480px; overflow-y: auto; }
+  .scene { font-family: var(--serif); color: var(--narrative-ink); border-left: 2px solid #3a4c5c; padding: 0.15rem 0 0.15rem 0.9rem; margin-bottom: 1rem; }
+  .scene:last-child { margin-bottom: 0; }
+  .scene-body { font-size: 1.02rem; line-height: 1.55; }
+  .scene-tick { font-family: var(--mono); font-size: 0.7rem; color: var(--text-faint); margin-bottom: 0.25rem; letter-spacing: 0.03em; }
+  .empty-note { color: var(--text-faint); font-style: italic; font-family: var(--serif); }
+
+  .side-stack { display: flex; flex-direction: column; gap: 1.25rem; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 1rem; font-size: 0.88rem; }
+  .kv dt { color: var(--text-muted); }
+  .kv dd { margin: 0; text-align: right; color: var(--text); }
+  .kv dd.warn { color: var(--vitality); }
+
+  .settlement-sparkline svg { width: 100%; height: 34px; display: block; margin-top: 0.6rem; }
+
+  .hatch-inventory { font-size: 0.8rem; color: var(--text-muted); margin: 0.5rem 0; }
+  .hatch-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.6rem; max-height: 220px; overflow-y: auto; padding-right: 0.2rem; }
+  .hatch-actions button { background: #17222c; border-color: #2f4e66; font-size: 0.8rem; }
+  .hatch-actions button:hover { background: #1f3242; }
+  #actionFeedback { color: #6ee7a8; font-size: 0.78rem; margin-top: 0.5rem; min-height: 1em; }
+
+  /* ---------- leads ---------- */
+  .leads { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .lead-card { flex: 1 1 260px; }
+  .lead-name { font-size: 1rem; font-weight: 600; color: var(--text); }
+  .lead-name .dead-tag { color: var(--alert); font-weight: 400; font-size: 0.8rem; }
+  .lead-meta { color: var(--text-muted); font-size: 0.78rem; margin: 0.2rem 0; }
+  .lead-summary { font-family: var(--serif); font-style: italic; color: var(--narrative-ink); font-size: 0.92rem; margin-top: 0.55rem; line-height: 1.4; }
+  .lead-metrics { display: flex; gap: 1rem; margin-top: 0.6rem; font-size: 0.74rem; color: var(--text-faint); }
+  .caution-bar { width: 60px; height: 4px; background: #232a35; border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 0.4rem; }
+  .caution-bar-fill { height: 100%; background: var(--vitality); }
+
+  /* ---------- crowd ---------- */
+  .crowd-panel { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: center; }
+  .specialty-bars { display: flex; flex-direction: column; gap: 0.4rem; min-width: 220px; }
+  .specialty-row { display: flex; align-items: center; gap: 0.6rem; font-size: 0.8rem; }
+  .specialty-label { width: 48px; color: var(--text-muted); }
+  .specialty-track { flex: 1; height: 8px; background: #1a2029; border-radius: 4px; overflow: hidden; }
+  .specialty-fill { height: 100%; background: var(--data); }
+  .specialty-count { width: 24px; text-align: right; color: var(--text-faint); }
+  .crowd-total { color: var(--text-muted); font-size: 0.85rem; }
+  .crowd-total b { color: var(--text); }
+
+  /* ---------- events ---------- */
+  .events-feed { font-size: 0.85rem; }
+  .event-row { padding: 0.3rem 0; border-bottom: 1px solid #1a1f28; display: flex; gap: 0.75rem; }
+  .event-row:last-child { border-bottom: none; }
+  .event-tick { color: var(--text-faint); width: 4.5rem; flex-shrink: 0; }
+  .event-death { color: var(--alert); }
+  .event-order { color: var(--vitality); }
+
+  /* ---------- footer log ---------- */
+  #log { white-space: pre; color: var(--text-faint); font-size: 0.76rem; max-height: 160px; overflow-y: auto; }
+</style>
+
+<div class="masthead">
+  <div class="masthead-top">
+    <h1 class="masthead-title"><strong>seam</strong> — observation deck</h1>
+    <div class="masthead-stats">
+      <span><span id="statusDot" class="dot down"></span><span id="status">disconnected</span></span>
+      <span>tick <b id="tick">–</b></span>
+      <span>uptime <b id="uptime">–</b></span>
+      <span>population <b id="population">–</b></span>
+      <span>trades <b id="trades">–</b></span>
+      <span>specialization <b id="specIdx">–</b></span>
+    </div>
+  </div>
+  <div class="vitals">
+    <svg id="vitalsSvg" viewBox="0 0 300 46" preserveAspectRatio="none"></svg>
+    <div class="vitals-legend">
+      <span><span class="swatch" style="background:#6ee7a8"></span>population</span>
+      <span><span class="swatch" style="background:var(--vitality)"></span>avg hunger</span>
+      <span><span class="swatch" style="background:var(--data)"></span>specialization</span>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="connectBtn">connect</button>
+    <button id="disconnectBtn">disconnect</button>
+  </div>
+</div>
+
+<div class="main-grid">
+  <div>
+    <h2>what's happening</h2>
+    <div class="panel narrative-panel" id="narrative"><div class="empty-note">no scenes written yet</div></div>
+  </div>
+
+  <div class="side-stack">
+    <div>
+      <h2>the settlement</h2>
+      <div class="panel" id="settlement"></div>
+    </div>
+    <div>
+      <h2>the hatch (you)</h2>
+      <div class="panel">
+        <div class="kv" id="hatchMeta"></div>
+        <div class="hatch-inventory" id="hatchInventory"></div>
+        <div class="hatch-actions" id="hatchActions"></div>
+        <div id="actionFeedback"></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <h2>leads</h2>
-<div class="leads" id="leads"></div>
+<div class="leads panel-row" id="leads"></div>
+
+<h2>the crowd</h2>
+<div class="panel crowd-panel" id="crowd"><span class="crowd-total">loading…</span></div>
+
+<h2>events</h2>
+<div class="panel events-feed" id="events"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
+
+<h2>raw feed</h2>
 <div id="log"></div>
+
 <script>
   let ws = null;
   const statusEl = document.getElementById("status");
+  const statusDot = document.getElementById("statusDot");
   const logEl = document.getElementById("log");
-  const fields = ["tick", "population", "avg_energy", "avg_hunger", "trades_cumulative", "specialization_index"];
-  const elIds = { tick: "tick", population: "population", avg_energy: "avgEnergy", avg_hunger: "avgHunger", trades_cumulative: "trades", specialization_index: "specIdx" };
+
+  const HISTORY_CAP = 300;
+  const history = []; // { tick, population, avg_hunger, specialization_index }
+  const settlementHistory = []; // { tick, population_alive, avg_hunger }
 
   function setStatus(connected) {
     statusEl.textContent = connected ? "connected" : "disconnected";
-    statusEl.className = connected ? "connected" : "disconnected";
+    statusDot.className = "dot " + (connected ? "up" : "down");
   }
 
   function escapeHtml(s) {
     return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
+  function fmtUptime(secs) {
+    if (secs == null) return "–";
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = Math.floor(secs % 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  // ---------- sparklines (hand-rolled SVG, no charting library) ----------
+  // CSS custom properties (var(...)) don't resolve inside raw SVG
+  // presentation attributes the way they do in a stylesheet or style=""
+  // context, so colors here are the literal hex values, not var() refs.
+  const COLOR_POPULATION = "#6ee7a8";
+  const COLOR_HUNGER = "#d9a860";
+  const COLOR_SPEC = "#8fd3ff";
+  const EDGE_PAD = 4; // keeps a flat line at the min/max from clipping against the viewBox edge
+
+  function normalize(values, lo, hi, height) {
+    const range = hi - lo || 1;
+    const usable = height - EDGE_PAD * 2;
+    return values.map((v) => EDGE_PAD + (1 - (v - lo) / range) * usable);
+  }
+
+  function polylinePoints(values, width, height, lo, hi) {
+    if (values.length < 2) return "";
+    const ys = normalize(values, lo, hi, height);
+    const step = width / (values.length - 1);
+    return ys.map((y, i) => `${(i * step).toFixed(1)},${y.toFixed(1)}`).join(" ");
+  }
+
+  function renderVitals() {
+    const svg = document.getElementById("vitalsSvg");
+    if (history.length < 2) { svg.innerHTML = ""; return; }
+    const w = 300, h = 46;
+    const pop = history.map((r) => r.population);
+    const hunger = history.map((r) => r.avg_hunger);
+    const spec = history.map((r) => r.specialization_index);
+    const popLine = polylinePoints(pop, w, h, 0, Math.max(...pop, 1));
+    const hungerLine = polylinePoints(hunger, w, h, 0, 100);
+    const specLine = polylinePoints(spec, w, h, 0, 1);
+    svg.innerHTML = `
+      <polyline points="${popLine}" fill="none" stroke="${COLOR_POPULATION}" stroke-width="1.4" />
+      <polyline points="${hungerLine}" fill="none" stroke="${COLOR_HUNGER}" stroke-width="1.2" opacity="0.85" />
+      <polyline points="${specLine}" fill="none" stroke="${COLOR_SPEC}" stroke-width="1.2" opacity="0.85" />
+    `;
+  }
+
+  function renderSettlementSparkline(container) {
+    if (settlementHistory.length < 2) { container.innerHTML = ""; return; }
+    const w = 100, h = 34;
+    const pop = settlementHistory.map((r) => r.population_alive);
+    const maxPop = Math.max(...pop, 1);
+    const line = polylinePoints(pop, w, h, 0, maxPop);
+    container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${line}" fill="none" stroke="#6ee7a8" stroke-width="1.6" /></svg>`;
+  }
+
+  // ---------- panel renderers ----------
   function renderLeads(leads) {
     const container = document.getElementById("leads");
     container.innerHTML = (leads || []).map((l) => {
       const name = l.display_name || l.id;
       const ratio = l.trade_success_ratio == null ? "n/a" : `${Math.round(l.trade_success_ratio * 100)}%`;
-      return `<div class="lead-card">
-        <div class="lead-name">${escapeHtml(name)}${l.alive ? "" : " (dead)"}</div>
+      const biasPct = Math.round((l.caution_bias || 0) * 100 / 0.9 * 100) / 100; // 0.9 is the mechanical cap
+      return `<div class="panel lead-card">
+        <div class="lead-name">${escapeHtml(name)}${l.alive ? "" : ' <span class="dead-tag">(dead)</span>'}</div>
         <div class="lead-meta">${escapeHtml(l.goal)} — ${escapeHtml(l.personality)}</div>
-        <div class="lead-meta">at ${escapeHtml(l.location)} | energy ${l.energy.toFixed(0)} | hunger ${l.hunger.toFixed(0)}</div>
-        <div class="lead-meta">recent trade success: ${ratio} | hunger scares: ${l.hunger_scares_witnessed}</div>
+        <div class="lead-meta">at ${escapeHtml(l.location)} · energy ${l.energy.toFixed(0)} · hunger ${l.hunger.toFixed(0)}</div>
         ${l.memory_summary ? `<div class="lead-summary">"${escapeHtml(l.memory_summary)}"</div>` : ""}
-        <div class="lead-bias">caution bias: ${l.caution_bias.toFixed(2)}</div>
+        <div class="lead-metrics">
+          <span>trade success ${ratio}</span>
+          <span>hunger scares ${l.hunger_scares_witnessed}</span>
+          <span>caution<span class="caution-bar"><span class="caution-bar-fill" style="width:${Math.min(100, biasPct)}%"></span></span></span>
+        </div>
       </div>`;
     }).join("");
   }
 
   function renderSettlement(s) {
     if (!s) return;
-    document.getElementById("settlement").innerHTML = `
-      <div>node: ${escapeHtml(s.node)}</div>
-      <div>population: ${s.population_alive} / ${s.roster_size}</div>
-      <div>avg energy: ${s.avg_energy.toFixed(1)}</div>
-      <div>avg hunger: ${s.avg_hunger.toFixed(1)}</div>
-      <div>food on hand: ${s.total_food_held.toFixed(1)}</div>
+    const container = document.getElementById("settlement");
+    const hungerWarn = s.avg_hunger >= 50;
+    container.innerHTML = `
+      <dl class="kv">
+        <dt>node</dt><dd>${escapeHtml(s.node)}</dd>
+        <dt>population</dt><dd>${s.population_alive} / ${s.roster_size}</dd>
+        <dt>avg energy</dt><dd>${s.avg_energy.toFixed(1)}</dd>
+        <dt>avg hunger</dt><dd class="${hungerWarn ? "warn" : ""}">${s.avg_hunger.toFixed(1)}</dd>
+        <dt>food on hand</dt><dd>${s.total_food_held.toFixed(1)}</dd>
+      </dl>
+      <div class="settlement-sparkline" id="settlementSpark"></div>
     `;
+    renderSettlementSparkline(document.getElementById("settlementSpark"));
   }
 
   function renderHatchMeta(h) {
-    const el = document.getElementById("hatchMeta");
-    if (!h) { el.textContent = "no hatch found"; return; }
-    el.textContent = `at ${h.location} | energy ${h.energy.toFixed(0)} | hunger ${h.hunger.toFixed(0)} | ${h.alive ? "alive" : "dead"}`;
+    const metaEl = document.getElementById("hatchMeta");
+    const invEl = document.getElementById("hatchInventory");
+    if (!h) { metaEl.innerHTML = "<dt>status</dt><dd>no hatch found</dd>"; invEl.textContent = ""; return; }
+    metaEl.innerHTML = `
+      <dt>location</dt><dd>${escapeHtml(h.location)}</dd>
+      <dt>energy</dt><dd>${h.energy.toFixed(0)}</dd>
+      <dt>hunger</dt><dd>${h.hunger.toFixed(0)}</dd>
+      <dt>status</dt><dd>${h.alive ? "alive" : "dead"}</dd>
+      <dt>hunger scares</dt><dd>${h.hunger_scares_witnessed}</dd>
+    `;
+    const inv = h.inventory || {};
+    const parts = Object.entries(inv).filter(([, v]) => v > 0.01).map(([k, v]) => `${v.toFixed(1)} ${k}`);
+    invEl.textContent = parts.length ? `holding: ${parts.join(", ")}` : "holding: nothing";
   }
 
-  let lastNarrativeTick = null;
   function renderNarrative(scenes) {
-    if (!scenes || scenes.length === 0) return;
-    const latestTick = scenes[scenes.length - 1].tick;
-    if (latestTick === lastNarrativeTick) return; // feed unchanged since last render, skip the rebuild
-    lastNarrativeTick = latestTick;
     const container = document.getElementById("narrative");
+    if (!scenes || scenes.length === 0) {
+      container.innerHTML = '<div class="empty-note">no scenes written yet</div>';
+      return;
+    }
     container.innerHTML = scenes.slice().reverse().map((s) => `
       <div class="scene">
         <div class="scene-tick">tick ${s.tick}</div>
-        <div class="scene-text">${escapeHtml(s.text)}</div>
+        <div class="scene-body">${escapeHtml(s.text)}</div>
       </div>
     `).join("");
   }
 
+  function renderEvents(events) {
+    const container = document.getElementById("events");
+    if (!events || events.length === 0) {
+      container.innerHTML = '<div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div>';
+      return;
+    }
+    container.innerHTML = events.slice().reverse().map((e) => {
+      const name = escapeHtml(e.display_name || e.agent_id);
+      if (e.kind === "death") {
+        return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span class="event-death">${name} dies</span></div>`;
+      }
+      return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span class="event-order">${name} orders ${escapeHtml(e.resource)} at ${escapeHtml(e.location)}</span></div>`;
+    }).join("");
+  }
+
+  // crowd specialty breakdown - fetched separately since /state doesn't carry
+  // the full crowd roster (only aggregate numbers), polled at a slower cadence
+  // than the tick stream since it changes rarely (only on death/rename).
+  async function refreshCrowd() {
+    const container = document.getElementById("crowd");
+    try {
+      const resp = await fetch("/agents");
+      if (!resp.ok) return;
+      const agents = await resp.json();
+      const crowd = agents.filter((a) => a.tier === "crowd");
+      const alive = crowd.filter((a) => a.alive);
+      const counts = {};
+      for (const a of alive) counts[a.specialty] = (counts[a.specialty] || 0) + 1;
+      const max = Math.max(...Object.values(counts), 1);
+      const bars = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([spec, n]) => `
+        <div class="specialty-row">
+          <span class="specialty-label">${escapeHtml(spec)}</span>
+          <span class="specialty-track"><span class="specialty-fill" style="width:${(n / max) * 100}%"></span></span>
+          <span class="specialty-count">${n}</span>
+        </div>
+      `).join("");
+      container.innerHTML = `
+        <div class="specialty-bars">${bars}</div>
+        <div class="crowd-total"><b>${alive.length}</b> / ${crowd.length} crowd agents alive</div>
+      `;
+    } catch (e) {
+      container.innerHTML = '<span class="crowd-total">(disconnected from service)</span>';
+    }
+  }
+
   function render(snap) {
     document.getElementById("tick").textContent = snap.tick;
+    document.getElementById("uptime").textContent = fmtUptime(snap.uptime_secs);
     document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
-    document.getElementById("avgEnergy").textContent = snap.avg_energy.toFixed(1);
-    document.getElementById("avgHunger").textContent = snap.avg_hunger.toFixed(1);
     document.getElementById("trades").textContent = snap.trades_cumulative;
     document.getElementById("specIdx").textContent = snap.specialization_index.toFixed(3);
+
+    history.push({ tick: snap.tick, population: snap.population, avg_hunger: snap.avg_hunger, specialization_index: snap.specialization_index });
+    if (history.length > HISTORY_CAP) history.shift();
+    if (snap.settlement) {
+      settlementHistory.push({ tick: snap.tick, population_alive: snap.settlement.population_alive, avg_hunger: snap.settlement.avg_hunger });
+      if (settlementHistory.length > HISTORY_CAP) settlementHistory.shift();
+    }
+    renderVitals();
+
     renderLeads(snap.leads);
     renderSettlement(snap.settlement);
     renderHatchMeta(snap.hatch);
     renderNarrative(snap.narrative);
+    renderEvents(snap.events);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");
   }
+
+  const ACTION_GROUP_ORDER = ["REST", "CONSUME", "GATHER", "CRAFT", "SIGNAL", "MOVE", "TRADE"];
 
   async function refreshHatchActions() {
     const container = document.getElementById("hatchActions");
@@ -141,11 +401,18 @@
       if (!resp.ok) { container.textContent = "(no hatch)"; return; }
       const candidates = await resp.json();
       container.innerHTML = "";
-      for (const c of candidates) {
-        const btn = document.createElement("button");
-        btn.textContent = c.description;
-        btn.onclick = () => submitHatchAction(c.intent, c.description);
-        container.appendChild(btn);
+      // Grouped by action type rather than left in whatever order the sim
+      // generated them - a wall of a dozen near-identical TRADE offers reads
+      // very differently from "here are your options, sorted."
+      const byAction = {};
+      for (const c of candidates) (byAction[c.intent.action] ??= []).push(c);
+      for (const action of ACTION_GROUP_ORDER) {
+        for (const c of byAction[action] || []) {
+          const btn = document.createElement("button");
+          btn.textContent = c.description;
+          btn.onclick = () => submitHatchAction(c.intent, c.description);
+          container.appendChild(btn);
+        }
       }
     } catch (e) {
       container.textContent = "(disconnected from service)";
@@ -164,7 +431,7 @@
     } catch (e) {
       feedback.textContent = "failed: could not reach service";
     }
-    setTimeout(refreshHatchActions, 400); // let it land, then show fresh options
+    setTimeout(refreshHatchActions, 400);
   }
 
   function connect() {
@@ -186,5 +453,7 @@
   document.getElementById("disconnectBtn").onclick = disconnect;
   connect();
   refreshHatchActions();
-  setInterval(refreshHatchActions, 3000); // options change as the world moves, even between clicks
+  refreshCrowd();
+  setInterval(refreshHatchActions, 3000);
+  setInterval(refreshCrowd, 10000);
 </script>

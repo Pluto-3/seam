@@ -295,6 +295,40 @@ def assign_crowd_identities(client: ServiceClient, model: str) -> None:
             client.post_identities(updates)
 
 
+def assign_lead_identities(client: ServiceClient, model: str) -> None:
+    """Leads already surface goal/personality separately in the viewer, so
+    this is just a fitting first name, not a full identity - one small
+    batched call. Fixes a real gap: the crowd got named at startup from the
+    start, leads never did, even though Phase 2's design intent covered
+    both."""
+    leads = client.get_leads()
+    unnamed = [l for l in leads if not l.get("display_name")]
+    if not unnamed:
+        return
+    prompt = (
+        "Invent a short first name fitting each character below, given their goal and "
+        "personality. Reply with exactly one line per id, in this exact format, no other text:\n"
+        + "\n".join(f"{l['id']}: <Name>  (goal: {l['goal']}, personality: {l['personality']})" for l in unnamed)
+    )
+    response = query_ollama(prompt, model=model)
+    if not response:
+        return
+    wanted = {l["id"] for l in unnamed}
+    updates = []
+    for line in response.strip().splitlines():
+        if ":" not in line:
+            continue
+        agent_id, rest = line.split(":", 1)
+        agent_id = agent_id.strip()
+        if agent_id not in wanted:
+            continue
+        name = rest.split("(")[0].strip()  # drop any echoed goal/personality parenthetical
+        if name:
+            updates.append({"id": agent_id, "display_name": name})
+    if updates:
+        client.post_identities(updates)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="seam v2 Phase 2 - LLM orchestration sidecar")
     p.add_argument("--service", default="http://localhost:7878")
@@ -314,8 +348,9 @@ def main() -> None:
     lead_ids = [l["id"] for l in leads]
     print(f"sidecar watching leads: {lead_ids} (model={args.model})", flush=True)
 
-    print("assigning crowd identities (one-time, batched)...", flush=True)
+    print("assigning crowd + lead identities (one-time, batched)...", flush=True)
     assign_crowd_identities(client, args.model)
+    assign_lead_identities(client, args.model)
     print("done", flush=True)
 
     # Continuity across sidecar restarts: pick up the last scene already
