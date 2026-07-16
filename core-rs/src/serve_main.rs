@@ -118,10 +118,12 @@ struct Snapshot {
     leads: Vec<serde_json::Value>,
     hatch: Option<serde_json::Value>,
     settlement: serde_json::Value,
+    narrative: Vec<serde_json::Value>,
 }
 
 const HATCH_ID: &str = "hatch0";
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
+const NARRATIVE_FEED_CAP: usize = 20;
 
 struct SimState {
     world: World,
@@ -148,6 +150,11 @@ struct SimState {
     full_log: bool,
     stats_every_secs: u64,
     last_stats_write: std::time::Instant,
+    // Phase 4: periodic scene-writing from the sidecar, capped rolling feed -
+    // read-only from the sim's own perspective, just a place to keep what's
+    // been written so far for the viewer and for the sidecar's own next
+    // prompt (continuity between scenes).
+    narrative_feed: std::collections::VecDeque<serde_json::Value>,
 }
 
 struct AppState {
@@ -197,6 +204,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         leads,
         hatch,
         settlement: build_settlement_view(sim),
+        narrative: sim.narrative_feed.iter().cloned().collect(),
     }
 }
 
@@ -255,6 +263,7 @@ async fn main() {
         full_log: a.full_log,
         stats_every_secs: a.stats_every_secs,
         last_stats_write: std::time::Instant::now(),
+        narrative_feed: std::collections::VecDeque::new(),
     };
 
     let (tx, _rx) = broadcast::channel(32);
@@ -309,6 +318,7 @@ async fn main() {
         .route("/settlement", get(get_settlement))
         .route("/player/candidates", get(get_player_candidates))
         .route("/player/action", post(post_player_action))
+        .route("/narrative", get(get_narrative).post(post_narrative))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", a.port);
@@ -492,6 +502,34 @@ async fn post_player_action(State(state): State<Arc<AppState>>, Json(intent): Js
         return StatusCode::NOT_FOUND;
     }
     sim.pending_intents.insert(HATCH_ID.to_string(), intent);
+    StatusCode::OK
+}
+
+async fn get_narrative(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
+    let sim = state.sim.lock().unwrap();
+    Json(sim.narrative_feed.iter().cloned().collect())
+}
+
+#[derive(Deserialize)]
+struct NarrativeUpdate {
+    text: String,
+}
+
+/// The sidecar's periodic scene, appended to a capped rolling feed. Purely
+/// additive from the sim's perspective - nothing here can affect the
+/// simulation itself, this is read-only narration layered on top.
+async fn post_narrative(State(state): State<Arc<AppState>>, Json(update): Json<NarrativeUpdate>) -> StatusCode {
+    let mut sim = state.sim.lock().unwrap();
+    let tick = sim.tick;
+    let entry = serde_json::json!({
+        "tick": tick,
+        "text": update.text,
+        "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+    });
+    sim.narrative_feed.push_back(entry);
+    while sim.narrative_feed.len() > NARRATIVE_FEED_CAP {
+        sim.narrative_feed.pop_front();
+    }
     StatusCode::OK
 }
 

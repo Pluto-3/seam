@@ -24,6 +24,10 @@
   .hatch-actions button:hover { background: #1f3242; }
   .hatch-meta { color: #8891a0; font-size: 0.85rem; margin-bottom: 0.5rem; }
   #actionFeedback { color: #6ee7a8; font-size: 0.8rem; margin-top: 0.4rem; min-height: 1em; }
+  #narrative { max-width: 620px; }
+  .scene { border-left: 2px solid #2f4e66; padding: 0.5rem 0 0.5rem 0.8rem; margin-bottom: 0.6rem; }
+  .scene-tick { color: #6a7280; font-size: 0.75rem; margin-bottom: 0.2rem; }
+  .scene-text { color: #d8dee4; font-size: 0.92rem; line-height: 1.4; }
 </style>
 <h1>seam — CCTV view</h1>
 <p>status: <span id="status" class="disconnected">disconnected</span></p>
@@ -37,6 +41,8 @@
   <tr><td class="label">cumulative trades</td><td id="trades">-</td></tr>
   <tr><td class="label">specialization index</td><td id="specIdx">-</td></tr>
 </table>
+<h2>what's happening</h2>
+<div id="narrative"></div>
 <h2>settlement</h2>
 <div class="settlement" id="settlement"></div>
 
@@ -97,6 +103,21 @@
     el.textContent = `at ${h.location} | energy ${h.energy.toFixed(0)} | hunger ${h.hunger.toFixed(0)} | ${h.alive ? "alive" : "dead"}`;
   }
 
+  let lastNarrativeTick = null;
+  function renderNarrative(scenes) {
+    if (!scenes || scenes.length === 0) return;
+    const latestTick = scenes[scenes.length - 1].tick;
+    if (latestTick === lastNarrativeTick) return; // feed unchanged since last render, skip the rebuild
+    lastNarrativeTick = latestTick;
+    const container = document.getElementById("narrative");
+    container.innerHTML = scenes.slice().reverse().map((s) => `
+      <div class="scene">
+        <div class="scene-tick">tick ${s.tick}</div>
+        <div class="scene-text">${escapeHtml(s.text)}</div>
+      </div>
+    `).join("");
+  }
+
   function render(snap) {
     document.getElementById("tick").textContent = snap.tick;
     document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
@@ -107,6 +128,7 @@
     renderLeads(snap.leads);
     renderSettlement(snap.settlement);
     renderHatchMeta(snap.hatch);
+    renderNarrative(snap.narrative);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");

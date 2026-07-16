@@ -165,12 +165,23 @@ proves worth continuing, and each has a concrete pass/fail check, not just
   ~3749 - over 3.5x longer. Real and substantial, more precisely described
   as delaying/softening decline than "growth" - see `LOG.md` for the full
   account, including why the first two attempts didn't show it.
-- **Phase 4 — Narrative generation.** Periodic scene-writing LLM calls
-  reading across leads + the player's settlement, surfaced as a live feed in
-  the viewer. **Proof:** a multi-hour run produces a feed a person would
-  actually choose to read, not a formatted log line — this is a human
-  judgment call the build itself can't confirm, same caveat v1 gave Phase 1's
-  "does it read well."
+- **Phase 4 — Narrative generation. BUILT, 2026-07-16 - awaiting human read.**
+  A capped rolling feed (`GET`/`POST /narrative`) written by a third periodic
+  sidecar task reading across leads + the settlement, folded into the
+  existing snapshot push so the viewer needed only a new panel, not a new
+  polling mechanism. **A real quality problem was caught before shipping,
+  not after**: the first prompt asked the model to "narrate a scene" and it
+  invented people, objects, and a whole storyline with none of it grounded
+  in what the sim actually tracks - and continuity (feeding the previous
+  scene back in) compounded the fabrication across cycles rather than
+  correcting it. Fixed by reframing the ask as "write a status report using
+  ONLY the facts given" rather than open-ended scene-writing; re-verified
+  clean afterward. **Proof is still the human judgment call it always was**
+  - the mechanism works and no longer fabricates, but whether the writing
+  is actually good enough to want to read needs a person looking at the
+  live feed, same as v1's own "does it read well" for Phase 1. See `LOG.md`
+  for the full account of what the hallucination looked like and why the
+  fix worked.
 - **Phase 5 — Data layer + exporters.** Move logging to PostgreSQL, update
   the three exporters to read the richer lead/crowd data (memory summaries,
   settlement health, narrative scenes). Waypoint/other downstream integration

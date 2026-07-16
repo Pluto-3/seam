@@ -1,6 +1,7 @@
-"""Phase 2 LLM orchestration sidecar - talks to the Rust `serve` service over
-HTTP instead of the simulation living in the same process, the way v1's
-leads.py did.
+"""LLM orchestration sidecar (Phase 2-4) - talks to the Rust `serve` service
+over HTTP instead of the simulation living in the same process, the way v1's
+leads.py did. Handles lead decisions + memory (Phase 2) and the periodic
+narrative scene (Phase 4).
 
 Same non-blocking shape as v1 (leads.py + watch.py's ThreadPoolExecutor):
 every lead decision runs on a background thread; the main loop never waits
@@ -31,6 +32,7 @@ REQUEST_TIMEOUT = 15.0  # seconds
 
 LEAD_DECISION_INTERVAL_SECONDS = 3.0   # real-time equivalent of v1's 20-tick interval
 MEMORY_SUMMARY_INTERVAL_SECONDS = 30.0  # much less frequent - this is the "periodic" self-summary
+NARRATIVE_INTERVAL_SECONDS = 90.0  # slower still - a scene every so often, not a play-by-play
 
 
 def query_ollama(prompt: str, model: str = DEFAULT_MODEL, timeout: float = REQUEST_TIMEOUT) -> Optional[str]:
@@ -118,6 +120,15 @@ class ServiceClient:
     def post_identities(self, updates: list[dict]) -> bool:
         return self._post("/agents/identities", updates)
 
+    def get_settlement(self) -> Optional[dict]:
+        return self._get("/settlement")
+
+    def get_narrative(self) -> list[dict]:
+        return self._get("/narrative") or []
+
+    def post_narrative(self, text: str) -> bool:
+        return self._post("/narrative", {"text": text})
+
 
 def build_decision_prompt(lead: dict, candidates: list[dict]) -> str:
     lines = [
@@ -188,6 +199,52 @@ def summarize_for_lead(client: ServiceClient, lead_id: str, model: str, log: Dec
                hunger_scares_witnessed=lead.get("hunger_scares_witnessed"))
 
 
+def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: str) -> str:
+    lead_lines = []
+    for l in leads:
+        if not l["alive"]:
+            lead_lines.append(f"- {l.get('display_name') or l['id']} has died.")
+            continue
+        note = f' They recently said: "{l["memory_summary"]}"' if l.get("memory_summary") else ""
+        lead_lines.append(
+            f"- {l.get('display_name') or l['id']} ({l['goal']}), at {l['location']}, "
+            f"energy {l['energy']:.0f}, hunger {l['hunger']:.0f}.{note}"
+        )
+
+    settlement_line = (
+        f"The settlement at {settlement['node']}: {settlement['population_alive']}/{settlement['roster_size']} "
+        f"people, average hunger {settlement['avg_hunger']:.0f}, {settlement['total_food_held']:.0f} food on hand."
+    )
+
+    context = "\n".join(["Leads:"] + lead_lines + ["", settlement_line])
+    continuity = f'\nThe last thing written about this world was: "{previous_scene}"\n' if previous_scene else ""
+
+    return (
+        "Write a two-sentence status report on the simulated economy below, using ONLY the "
+        "facts given. Do not invent people, objects, professions, weather, or actions that "
+        "aren't stated. Do not describe anyone gathering, cooking, or crafting unless it's "
+        "in the data. Just restate what the numbers and quotes below actually say, in plain "
+        "prose instead of a list. Present tense, third person, no preamble, no title.\n\n"
+        f"{context}\n{continuity}"
+        "Status report:"
+    )
+
+
+def write_narrative_scene(client: ServiceClient, model: str, log: DecisionLog, previous: dict) -> None:
+    leads = client.get_leads()
+    settlement = client.get_settlement()
+    if not leads or settlement is None:
+        return
+    response = query_ollama(build_narrative_prompt(leads, settlement, previous.get("text", "")), model=model)
+    if not response:
+        log.record(kind="narrative", llm_answered=False)
+        return
+    scene = " ".join(response.strip().split())[:500]
+    client.post_narrative(scene)
+    previous["text"] = scene
+    log.record(kind="narrative", llm_answered=True, scene=scene)
+
+
 CROWD_NAMING_BATCH_SIZE = 10  # one Ollama call per batch, not per agent - cheap flavor, not per-agent cost
 
 
@@ -244,6 +301,7 @@ def main() -> None:
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--decision-interval", type=float, default=LEAD_DECISION_INTERVAL_SECONDS)
     p.add_argument("--memory-interval", type=float, default=MEMORY_SUMMARY_INTERVAL_SECONDS)
+    p.add_argument("--narrative-interval", type=float, default=NARRATIVE_INTERVAL_SECONDS)
     p.add_argument("--log-path", default=None, help="JSONL log of every decision/summary attempt (optional)")
     args = p.parse_args()
 
@@ -260,11 +318,18 @@ def main() -> None:
     assign_crowd_identities(client, args.model)
     print("done", flush=True)
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(lead_ids)) * 2)
+    # Continuity across sidecar restarts: pick up the last scene already
+    # posted, if any, rather than starting the story over from nothing.
+    existing_narrative = client.get_narrative()
+    previous_scene = {"text": existing_narrative[-1]["text"] if existing_narrative else ""}
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(lead_ids)) * 2 + 1)
     decision_futures: dict[str, concurrent.futures.Future] = {}
     memory_futures: dict[str, concurrent.futures.Future] = {}
+    narrative_future: Optional[concurrent.futures.Future] = None
     next_decision_due = {lid: 0.0 for lid in lead_ids}
     next_memory_due = {lid: time.monotonic() + args.memory_interval for lid in lead_ids}
+    next_narrative_due = time.monotonic() + args.narrative_interval
 
     try:
         while True:
@@ -278,6 +343,9 @@ def main() -> None:
                 if fut.done():
                     del memory_futures[lid]
 
+            if narrative_future is not None and narrative_future.done():
+                narrative_future = None
+
             for lid in lead_ids:
                 if now >= next_decision_due[lid] and lid not in decision_futures:
                     decision_futures[lid] = executor.submit(decide_for_lead, client, lid, args.model, log)
@@ -286,6 +354,10 @@ def main() -> None:
                 if now >= next_memory_due[lid] and lid not in memory_futures:
                     memory_futures[lid] = executor.submit(summarize_for_lead, client, lid, args.model, log)
                     next_memory_due[lid] = now + args.memory_interval
+
+            if now >= next_narrative_due and narrative_future is None:
+                narrative_future = executor.submit(write_narrative_scene, client, args.model, log, previous_scene)
+                next_narrative_due = now + args.narrative_interval
 
             time.sleep(0.5)
     except KeyboardInterrupt:
