@@ -144,11 +144,26 @@ struct Snapshot {
     possessed_society: String,
     narrative: Vec<serde_json::Value>,
     events: Vec<serde_json::Value>,
+    // v3 Phase 4: a separate feed from `events`, not folded into it - found
+    // during verification that routine "order" events (also lead/hatch-tier,
+    // frequent under scarcity) were flooding the shared 30-slot cap and
+    // evicting cross-society highlights before a human ever saw one. Kept
+    // small and separate so the rarer, more interesting moments don't have
+    // to compete with routine activity for the same slots.
+    highlights: Vec<serde_json::Value>,
 }
 
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
 const NARRATIVE_FEED_CAP: usize = 20;
 const EVENTS_FEED_CAP: usize = 30;
+const HIGHLIGHTS_FEED_CAP: usize = 20;
+// v3 Phase 4: found during verification that one recurring trade pair
+// (a hatch parked near a border, repeatedly trading with the same one or
+// two crowd members) can monopolize the entire highlights feed - correct
+// detections, but not a "highlight" repeated fifteen times. Same cooldown
+// concept as decide.rs's SIGNAL_COOLDOWN/can_signal, applied to a trading
+// pair instead of a signal kind.
+const CROSS_TRADE_HIGHLIGHT_COOLDOWN: i64 = 300;
 
 /// v3 Phase 0: one of these per society instead of one hardcoded settlement.
 /// Generalizes what Phase 3 (v2) built - a home node, a fixed roster of
@@ -205,6 +220,13 @@ struct SimState {
     // only inferable from population silently dropping. A terse rolling feed,
     // built straight from each tick's own entries, no separate bookkeeping.
     notable_events: std::collections::VecDeque<serde_json::Value>,
+    // v3 Phase 4: cross-society highlights, kept separate from
+    // notable_events so routine order/death traffic can't crowd them out.
+    highlights: std::collections::VecDeque<serde_json::Value>,
+    // v3 Phase 4: last tick a given (agent, target) pair - normalized,
+    // order doesn't matter - produced a cross_trade highlight. Prevents one
+    // recurring relationship from monopolizing the whole highlights feed.
+    cross_trade_cooldowns: HashMap<(String, String), i64>,
 }
 
 struct AppState {
@@ -339,6 +361,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         possessed_society: sim.possessed_society.clone(),
         narrative: sim.narrative_feed.iter().cloned().collect(),
         events: sim.notable_events.iter().cloned().collect(),
+        highlights: sim.highlights.iter().cloned().collect(),
     }
 }
 
@@ -447,6 +470,8 @@ async fn main() {
         last_stats_write: std::time::Instant::now(),
         narrative_feed: std::collections::VecDeque::new(),
         notable_events: std::collections::VecDeque::new(),
+        highlights: std::collections::VecDeque::new(),
+        cross_trade_cooldowns: HashMap::new(),
     };
 
     let run_id = a.run_id.clone().unwrap_or_else(|| {
@@ -499,9 +524,28 @@ async fn main() {
                         let name = sim.agents.iter().find(|a| a.id == e.agent_id)
                             .and_then(|a| a.display_name.clone()).unwrap_or_else(|| e.agent_id.clone());
                         if e.action == "DEATH" {
+                            // Unconditional, unchanged from before Phase 4 - the
+                            // main events feed's job of tracking every death
+                            // (population awareness) shouldn't depend on whether
+                            // this specific one also qualifies as a highlight.
                             sim.notable_events.push_back(serde_json::json!({
                                 "tick": e.tick, "kind": "death", "agent_id": e.agent_id, "display_name": name,
                             }));
+                            // v3 Phase 4: additionally, a death away from the
+                            // dying agent's own society's home node is a real
+                            // highlight - pushed to the separate highlights feed,
+                            // not instead of the plain death entry above.
+                            let location = e.state_after["location"].as_str().unwrap_or("").to_string();
+                            let own_society = society_of(sim, &e.agent_id);
+                            let foreign_society = sim.societies.iter().find(|s| {
+                                s.home_node == location && own_society.map(|o| o.id != s.id).unwrap_or(true)
+                            });
+                            if let Some(foreign) = foreign_society {
+                                sim.highlights.push_back(serde_json::json!({
+                                    "tick": e.tick, "kind": "foreign_death", "agent_id": e.agent_id, "display_name": name,
+                                    "society": own_society.map(|s| s.id.clone()), "foreign_society": foreign.id,
+                                }));
+                            }
                         // "player" tier catches any society's hatch, not just one -
                         // avoids hardcoding a single hatch id now that there are N.
                         } else if e.action == "SIGNAL" && (e.tier == "lead" || e.tier == "player") {
@@ -512,10 +556,45 @@ async fn main() {
                                     "resource": kind, "location": location,
                                 }));
                             }
+                        // v3 Phase 4: only a lead/hatch's own trade counts - the
+                        // same curation the SIGNAL gate above already relies on.
+                        // Cross-society trade is common (~30% of all trades, per
+                        // Phase 3) - without this gate the feed would just be
+                        // flooded with ordinary crowd-crowd trades, not highlights.
+                        } else if e.action == "TRADE" && e.success && (e.tier == "lead" || e.tier == "player") {
+                            if let Some(target_id) = &e.target {
+                                let own_society = society_of(sim, &e.agent_id);
+                                let target_society = society_of(sim, target_id);
+                                if let (Some(own), Some(other)) = (own_society, target_society) {
+                                    if own.id != other.id {
+                                        let pair = if e.agent_id <= *target_id {
+                                            (e.agent_id.clone(), target_id.clone())
+                                        } else {
+                                            (target_id.clone(), e.agent_id.clone())
+                                        };
+                                        let on_cooldown = sim.cross_trade_cooldowns.get(&pair)
+                                            .map(|&last| e.tick - last < CROSS_TRADE_HIGHLIGHT_COOLDOWN)
+                                            .unwrap_or(false);
+                                        if !on_cooldown {
+                                            let target_name = sim.agents.iter().find(|a| &a.id == target_id)
+                                                .and_then(|a| a.display_name.clone()).unwrap_or_else(|| target_id.clone());
+                                            sim.highlights.push_back(serde_json::json!({
+                                                "tick": e.tick, "kind": "cross_trade", "agent_id": e.agent_id, "display_name": name,
+                                                "society": own.id, "target": target_id, "target_display_name": target_name,
+                                                "target_society": other.id,
+                                            }));
+                                            sim.cross_trade_cooldowns.insert(pair, e.tick);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     while sim.notable_events.len() > EVENTS_FEED_CAP {
                         sim.notable_events.pop_front();
+                    }
+                    while sim.highlights.len() > HIGHLIGHTS_FEED_CAP {
+                        sim.highlights.pop_front();
                     }
 
                     let full_log = sim.full_log;
@@ -772,6 +851,18 @@ async fn get_societies(State(state): State<Arc<AppState>>) -> Json<Vec<serde_jso
 /// /player/action, everything else about them is unchanged from Phase 0.
 fn possessed_hatch_id(sim: &SimState) -> Option<String> {
     sim.societies.iter().find(|s| s.id == sim.possessed_society).map(|s| s.hatch_id.clone())
+}
+
+/// v3 Phase 4: resolves an arbitrary agent id to its society - no existing
+/// lookup does this (possessed_hatch_id above only resolves the currently
+/// possessed one). Needed to tell a cross-society trade/death apart from
+/// an ordinary one.
+fn society_of<'a>(sim: &'a SimState, agent_id: &str) -> Option<&'a Society> {
+    sim.societies.iter().find(|s| {
+        s.roster.iter().any(|id| id == agent_id)
+            || s.hatch_id == agent_id
+            || s.lead_id.as_deref() == Some(agent_id)
+    })
 }
 
 /// Same shape as GET /leads/:id/candidates, fixed to whichever society is

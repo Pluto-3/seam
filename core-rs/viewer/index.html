@@ -126,6 +126,7 @@
   .event-tick { color: var(--text-faint); width: 4.5rem; flex-shrink: 0; }
   .event-death { color: var(--alert); }
   .event-order { color: var(--vitality); }
+  .event-cross { color: #6ee7a8; }
 
   /* ---------- footer log ---------- */
   #log { white-space: pre; color: var(--text-faint); font-size: 0.76rem; max-height: 160px; overflow-y: auto; }
@@ -188,6 +189,9 @@
 
 <h2>the crowd</h2>
 <div class="panel crowd-panel" id="crowd"><span class="crowd-total">loading…</span></div>
+
+<h2>highlights</h2>
+<div class="panel events-feed" id="highlights"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
 
 <h2>events</h2>
 <div class="panel events-feed" id="events"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
@@ -371,12 +375,41 @@
       container.innerHTML = '<div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div>';
       return;
     }
+    // v3 Phase 4: explicit branch per kind, not a bare catch-all fallback -
+    // a new kind added without one would previously have silently rendered
+    // as an "order" line, referencing fields (resource/location) it doesn't
+    // have.
     container.innerHTML = events.slice().reverse().map((e) => {
       const name = escapeHtml(e.display_name || e.agent_id);
       if (e.kind === "death") {
         return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span class="event-death">${name} dies</span></div>`;
+      } else if (e.kind === "order") {
+        return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span class="event-order">${name} orders ${escapeHtml(e.resource)} at ${escapeHtml(e.location)}</span></div>`;
       }
-      return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span class="event-order">${name} orders ${escapeHtml(e.resource)} at ${escapeHtml(e.location)}</span></div>`;
+      return `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span>${name}: ${escapeHtml(e.kind)}</span></div>`;
+    }).join("");
+  }
+
+  // v3 Phase 4: a separate, smaller feed from `events` - cross-society
+  // trades and foreign deaths are real but comparatively rare, and sharing
+  // the events feed's 30-slot cap with routine "order" traffic (frequent
+  // under scarcity) was found, during verification, to crowd them out
+  // entirely before a human ever saw one.
+  function renderHighlights(highlights) {
+    const container = document.getElementById("highlights");
+    if (!highlights || highlights.length === 0) {
+      container.innerHTML = '<div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div>';
+      return;
+    }
+    container.innerHTML = highlights.slice().reverse().map((h) => {
+      const name = escapeHtml(h.display_name || h.agent_id);
+      if (h.kind === "foreign_death") {
+        return `<div class="event-row"><span class="event-tick">tick ${h.tick}</span><span class="event-death">${name} dies on ${escapeHtml(h.foreign_society)}'s turf</span></div>`;
+      } else if (h.kind === "cross_trade") {
+        const targetName = escapeHtml(h.target_display_name || h.target);
+        return `<div class="event-row"><span class="event-tick">tick ${h.tick}</span><span class="event-cross">${name} (${escapeHtml(h.society)}) trades with ${targetName} (${escapeHtml(h.target_society)})</span></div>`;
+      }
+      return `<div class="event-row"><span class="event-tick">tick ${h.tick}</span><span>${name}: ${escapeHtml(h.kind)}</span></div>`;
     }).join("");
   }
 
@@ -444,6 +477,7 @@
     renderLeads((snap.leads || []).filter((l) => focused && l.id === focused.lead_id));
     renderNarrative(snap.narrative);
     renderEvents(snap.events);
+    renderHighlights(snap.highlights);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");

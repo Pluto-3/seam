@@ -275,13 +275,51 @@ ones are proven worth continuing.
   explicit rivalry only if Phase 4's highlight extraction finds the
   implicit version starts feeling repetitive over much longer stretches, a
   genuinely open follow-up question this one experiment doesn't resolve.
-- **Phase 4 — Highlight extraction.** Build the cross-society-signal filter
-  over the existing event log; surface it as a feed or export, following
-  the exact non-blocking, read-only-filter posture the three existing
-  exporters already use. **Proof:** run for a real stretch, confirm the
-  highlight feed surfaces events a human agrees are actually notable, not
-  merely frequent — explicitly a human judgment call, same posture as v2
-  Phase 4's narrative check.
+- **Phase 4 — Highlight extraction. DONE, 2026-07-16.** Extends the
+  existing `sim.notable_events` live feed rather than building a new
+  offline export — a `society_of(sim, agent_id)` helper (no prior lookup
+  resolved an arbitrary agent to its society) tags two new highlight kinds:
+  `cross_trade` (a lead/hatch's own successful trade with an agent from a
+  different society — reuses the exact lead/hatch tier gate already
+  proven for standing orders, the actual curation mechanism that keeps
+  Phase 3's ~30% baseline crowd-crowd cross-trade rate from flooding a
+  feed meant to be rare) and `foreign_death` (a death at a different
+  society's home node — additive alongside the existing plain `death`
+  entry, not replacing it, so population-tracking isn't affected by
+  whether a given death also qualifies as a highlight).
+  **Two real problems found during live verification, both fixed, not
+  glossed over.** First: cross_trade/foreign_death initially shared the
+  existing `events` feed's 30-slot cap with routine `order` entries —
+  under this seed's scarcity, orders fire so often that **268 real,
+  correctly-detected cross-society trades occurred and zero survived** in
+  the live feed by the time it was checked. Fixed by giving highlights
+  their own separate, smaller feed (`highlights`, cap 20) so routine
+  activity can't crowd them out — a genuine, tested need, not
+  speculative. Second: even in its own feed, one recurring relationship
+  (a hatch parked near a border, repeatedly trading the same one or two
+  crowd partners) monopolized all 20 slots — correct detections, but not
+  a *highlight* repeated fifteen times. Fixed with a per-pair cooldown
+  (`CROSS_TRADE_HIGHLIGHT_COOLDOWN`, 300 ticks), the same cooldown concept
+  `decide.rs`'s `SIGNAL_COOLDOWN`/`can_signal` already uses for signal
+  spam, applied to a trading pair instead. Also fixed a latent viewer bug
+  found while touching this code: `renderEvents`'s second branch was a
+  bare `else`, not `else if (kind === "order")` — any new kind added
+  without an explicit branch would have silently rendered as a broken
+  order line.
+  **Proof, after both fixes**: a fresh live run (seed 19, the harshest
+  economy from Phase 3) produced 20 highlights with **zero repeated
+  pairs**, involving all four leads/hatches, not one — confirmed via
+  headless-Chrome DOM dump that the new `highlights` panel renders
+  correctly and the existing `events` panel is unaffected (regression
+  check on the bug fix). Human judgment call, stated honestly: lead-vs-lead
+  and lead-vs-hatch cross-society trades read as genuinely interesting
+  (named characters with real goals/personalities crossing society
+  lines); a lead/hatch trading with an anonymous crowd id is real but
+  less narratively rich until that crowd member has its own identity.
+  `foreign_death` never fired in this run (0 of several deaths) — an
+  honest null result, consistent with Phase 3's own raw-log check also
+  finding 0 qualifying deaths; the mechanism is real but this event type
+  is evidently rare at this scale, not proven wrong, just unobserved yet.
 
 ## Open questions
 
