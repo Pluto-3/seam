@@ -286,17 +286,24 @@ def _parse_identity_lines(response: Optional[str], ids: list[str]) -> list[dict]
     """Parses 'id: Name - blurb' lines, one per agent. Permissive: any line
     that doesn't parse cleanly is just skipped, not a failure for the batch -
     a partial set of crowd names is fine, this is cosmetic flavor, not a
-    mechanic anything depends on."""
+    mechanic anything depends on.
+
+    Id matching is case-insensitive: caught for real, not assumed - the model
+    sometimes writes "Lead0" instead of "lead0" (capitalizing what reads to it
+    like the start of a list item), which silently dropped every single line
+    the one time it happened, since a strict-case set lookup just skips
+    anything that doesn't match exactly."""
     if not response:
         return []
-    wanted = set(ids)
+    wanted = {i.lower(): i for i in ids}
     updates = []
     for line in response.strip().splitlines():
         if ":" not in line:
             continue
         agent_id, rest = line.split(":", 1)
         agent_id = agent_id.strip()
-        if agent_id not in wanted:
+        real_id = wanted.get(agent_id.lower())
+        if real_id is None:
             continue
         rest = rest.strip()
         if "-" in rest:
@@ -305,7 +312,7 @@ def _parse_identity_lines(response: Optional[str], ids: list[str]) -> list[dict]
             name, blurb = rest.split("—", 1)
         else:
             name, blurb = rest, ""
-        updates.append({"id": agent_id, "display_name": name.strip() or None, "blurb": blurb.strip() or None})
+        updates.append({"id": real_id, "display_name": name.strip() or None, "blurb": blurb.strip() or None})
     return updates
 
 
@@ -352,18 +359,23 @@ def assign_lead_identities(client: ServiceClient, model: str) -> None:
     response = query_ollama(prompt, model=model)
     if not response:
         return
-    wanted = {l["id"] for l in unnamed}
+    # Case-insensitive id matching - caught for real, not assumed: the model
+    # wrote "Lead0"/"Lead1"/"Lead2" instead of the expected lowercase one
+    # real time, which silently dropped every single line under a strict-case
+    # lookup and left all three leads unnamed with no error anywhere.
+    wanted = {l["id"].lower(): l["id"] for l in unnamed}
     updates = []
     for line in response.strip().splitlines():
         if ":" not in line:
             continue
         agent_id, rest = line.split(":", 1)
         agent_id = agent_id.strip()
-        if agent_id not in wanted:
+        real_id = wanted.get(agent_id.lower())
+        if real_id is None:
             continue
         name = rest.split("(")[0].strip()  # drop any echoed goal/personality parenthetical
         if name:
-            updates.append({"id": agent_id, "display_name": name})
+            updates.append({"id": real_id, "display_name": name})
     if updates:
         client.post_identities(updates)
 
