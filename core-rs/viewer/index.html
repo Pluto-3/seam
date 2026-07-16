@@ -84,6 +84,19 @@
   .hatch-actions button:hover { background: #1f3242; }
   #actionFeedback { color: #6ee7a8; font-size: 0.78rem; margin-top: 0.5rem; min-height: 1em; }
 
+  /* ---------- societies (v3 Phase 2: cards double as the switcher) ---------- */
+  .societies { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .society-card {
+    flex: 1 1 200px; text-align: left; font-family: var(--mono); color: var(--text);
+    display: flex; flex-direction: column; gap: 0.25rem;
+  }
+  .society-card:hover { background: #171f28; border-color: #34506b; }
+  .society-card.possessed { border-color: #4a8f6b; background: #131d18; }
+  .society-id { font-size: 0.95rem; font-weight: 600; }
+  .society-id .possessed-tag { color: #6ee7a8; font-weight: 400; font-size: 0.72rem; margin-left: 0.4rem; }
+  .society-meta { color: var(--text-muted); font-size: 0.78rem; }
+  .society-meta .warn { color: var(--vitality); }
+
   /* ---------- leads ---------- */
   .leads { display: flex; flex-wrap: wrap; gap: 1rem; }
   .lead-card { flex: 1 1 260px; }
@@ -144,6 +157,9 @@
   </div>
 </div>
 
+<h2>societies</h2>
+<div class="societies panel-row" id="societies"></div>
+
 <div class="main-grid">
   <div>
     <h2>what's happening</h2>
@@ -152,11 +168,11 @@
 
   <div class="side-stack">
     <div>
-      <h2>the settlement</h2>
+      <h2 id="settlementLabel">the settlement</h2>
       <div class="panel" id="settlement"></div>
     </div>
     <div>
-      <h2>the hatch (you)</h2>
+      <h2 id="hatchLabel">the hatch (you)</h2>
       <div class="panel">
         <div class="kv" id="hatchMeta"></div>
         <div class="hatch-inventory" id="hatchInventory"></div>
@@ -187,7 +203,8 @@
 
   const HISTORY_CAP = 300;
   const history = []; // { tick, population, avg_hunger, specialization_index }
-  const settlementHistory = []; // { tick, population_alive, avg_hunger }
+  let settlementHistory = []; // { tick, population_alive, avg_hunger } - for whichever society is currently focused
+  let focusedSocietyId = null; // tracked so a possession switch can reset settlementHistory instead of splicing two societies' numbers into one line
 
   function setStatus(connected) {
     statusEl.textContent = connected ? "connected" : "disconnected";
@@ -273,6 +290,32 @@
         </div>
       </div>`;
     }).join("");
+  }
+
+  // v3 Phase 2: one row of cards, one per society - the cards double as the
+  // switcher (clicking one both focuses the detail panels below on it and
+  // takes control of its hatch), not a separate read-only tab strip plus an
+  // independent "possess" button.
+  function renderSocieties(societies, possessed) {
+    const container = document.getElementById("societies");
+    container.innerHTML = (societies || []).map((s) => {
+      const isPossessed = s.id === possessed;
+      const hungerWarn = s.avg_hunger >= 50;
+      return `<button class="panel society-card${isPossessed ? " possessed" : ""}" onclick="possessSociety('${s.id}')">
+        <div class="society-id">${escapeHtml(s.id)}${isPossessed ? '<span class="possessed-tag">possessed</span>' : ""}</div>
+        <div class="society-meta">at ${escapeHtml(s.node)} · pop ${s.population_alive}/${s.roster_size}</div>
+        <div class="society-meta">energy ${s.avg_energy.toFixed(1)} · hunger <span class="${hungerWarn ? "warn" : ""}">${s.avg_hunger.toFixed(1)}</span></div>
+        <div class="society-meta">food ${s.total_food_held.toFixed(1)}</div>
+      </button>`;
+    }).join("");
+  }
+
+  async function possessSociety(id) {
+    await fetch(`/player/possess/${id}`, { method: "POST" });
+    // No local state to update here - the next snapshot (already streaming
+    // over the open WebSocket) carries the new possessed_society and
+    // render(snap) re-points every dependent panel from that, same as
+    // everything else in this file.
   }
 
   function renderSettlement(s) {
@@ -376,15 +419,29 @@
 
     history.push({ tick: snap.tick, population: snap.population, avg_hunger: snap.avg_hunger, specialization_index: snap.specialization_index });
     if (history.length > HISTORY_CAP) history.shift();
-    if (snap.settlement) {
-      settlementHistory.push({ tick: snap.tick, population_alive: snap.settlement.population_alive, avg_hunger: snap.settlement.avg_hunger });
-      if (settlementHistory.length > HISTORY_CAP) settlementHistory.shift();
-    }
     renderVitals();
 
-    renderLeads(snap.leads);
-    renderSettlement(snap.settlement);
-    renderHatchMeta(snap.hatch);
+    const societies = snap.societies || [];
+    const focused = societies.find((s) => s.id === snap.possessed_society);
+
+    // Switching societies shouldn't splice two different societies' numbers
+    // into one misleading line - reset the rolling history the moment the
+    // focused society actually changes, not just refuse to update it.
+    if (focused && focused.id !== focusedSocietyId) {
+      focusedSocietyId = focused.id;
+      settlementHistory = [];
+    }
+    if (focused) {
+      settlementHistory.push({ tick: snap.tick, population_alive: focused.population_alive, avg_hunger: focused.avg_hunger });
+      if (settlementHistory.length > HISTORY_CAP) settlementHistory.shift();
+    }
+
+    renderSocieties(societies, snap.possessed_society);
+    document.getElementById("settlementLabel").textContent = focused ? `the settlement (${focused.id})` : "the settlement";
+    document.getElementById("hatchLabel").textContent = focused ? `the hatch (you, ${focused.id})` : "the hatch (you)";
+    renderSettlement(focused);
+    renderHatchMeta(focused && focused.hatch);
+    renderLeads((snap.leads || []).filter((l) => focused && l.id === focused.lead_id));
     renderNarrative(snap.narrative);
     renderEvents(snap.events);
 

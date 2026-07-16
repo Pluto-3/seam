@@ -19,7 +19,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use seam_core::agents::{spawn_leads_at, AgentState};
+use seam_core::agents::{spawn_leads_at, AgentState, LEAD_GOALS};
 use seam_core::decide::{generate_candidates, Intent};
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
@@ -159,6 +159,12 @@ struct Society {
     home_node: String,
     roster: Vec<String>,
     hatch_id: String,
+    // v3 Phase 2: spawn_leads_at already pairs lead i with society i by
+    // construction, but that pairing previously existed only as an
+    // ordering convention, never stored as data - None if a society ends
+    // up without a lead (possible if --societies exceeds LEAD_GOALS.len(),
+    // a case Phase 0 already left as a known limitation).
+    lead_id: Option<String>,
 }
 
 struct SimState {
@@ -307,6 +313,7 @@ fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
         "avg_hunger": avg_hunger,
         "total_food_held": total_food_held,
         "hatch": hatch,
+        "lead_id": society.lead_id,
     })
 }
 
@@ -378,11 +385,17 @@ async fn main() {
         let hatch_specialty = seam_core::world::RAW_RESOURCES[i % seam_core::world::RAW_RESOURCES.len()];
         agents.push(AgentState::new_player(hatch_id.clone(), home_node.clone(), 80.0, 20.0, hatch_specialty));
 
+        // spawn_leads_at (called once, below, after this loop) pairs lead i
+        // with society i by construction - only the first LEAD_GOALS.len()
+        // societies actually get one, same known limitation noted there.
+        let lead_id = if i < LEAD_GOALS.len() { Some(format!("lead{i}")) } else { None };
+
         societies.push(Society {
             id: format!("society{i}"),
             home_node: home_node.clone(),
             roster,
             hatch_id,
+            lead_id,
         });
     }
 

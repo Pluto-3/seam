@@ -182,11 +182,33 @@ ones are proven worth continuing.
   with no lag from losing possession. 404 on an unknown society id
   confirmed not to mutate `possessed_society`. Existing headless `run`
   binary's selftest still passes.
-- **Phase 2 — Viewer: society switcher + overview.** Add tab navigation and
-  the comparative raw-numbers panel. **Proof:** switch between all N
-  societies live, with no disconnect or restart — the same non-blocking
-  precedent as v2 Phase 1's "world ticks with zero viewers," extended to
-  "switching focus doesn't disturb what's not currently being looked at."
+- **Phase 2 — Viewer: society switcher + overview. DONE, 2026-07-16.** The
+  cards double as the switcher, per a direct decision (not assumed): one row
+  of `.society-card` buttons (`renderSocieties`, `viewer/index.html`) shows
+  every society's raw numbers side by side, and clicking one both scopes
+  the settlement/hatch/leads panels below to it and calls the new `POST
+  /player/possess/:id` — one interaction, not a read-only tab strip plus a
+  separate possess button. `snap.possessed_society` (Phase 1) is the single
+  source of truth for both which card is highlighted and which society's
+  data renders — no client-side "selected" state to drift out of sync.
+  `refreshHatchActions`/`submitHatchAction` needed zero changes; they
+  already transparently followed server-side possession since Phase 1.
+  **One small backend addition found while planning this**: `Society`
+  (Phase 0) stored `hatch_id` but never `lead_id`, even though
+  `spawn_leads_at` already pairs lead *i* with society *i* by construction —
+  that pairing existed only as an implicit ordering convention until now,
+  needed to scope the leads panel correctly instead of guessing from index.
+  Also reset `settlementHistory` whenever the focused society's id changes,
+  so switching doesn't splice two societies' numbers into one misleading
+  sparkline line. **Proof:** verified against a live `serve` instance with
+  real headless-Chrome DOM dumps (not just reading the code) — confirmed 3
+  distinct cards with correct per-society numbers, the default-possessed
+  card highlighted, then switched possession via the same API call the
+  button's `onclick` makes and re-dumped: highlight moved, `the settlement
+  (society1)`/`the hatch (you, society1)` labels updated, leads panel
+  correctly showed only `lead1` (not all three), and `/player/candidates`
+  returned real candidates for the new hatch. Zero JS console errors across
+  both loads. Existing headless `run` selftest still passes.
 - **Phase 3 — Implicit rivalry stress test.** Run N societies for a real
   stretch (same discipline as the three parallel hard-seed experiments
   already run post-v2), specifically checking whether shared-node
