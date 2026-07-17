@@ -59,9 +59,10 @@
   h2:first-of-type { margin-top: 0; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 1rem 1.1rem; }
 
-  /* ---------- two-column: narrative | settlement+hatch ---------- */
-  .main-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 1.25rem; align-items: start; }
-  @media (max-width: 860px) { .main-grid { grid-template-columns: 1fr; } }
+  /* ---------- currently-watched society: settlement + hatch + lead ---------- */
+  .focused-grid { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: start; }
+  .focused-grid > div { flex: 1 1 280px; }
+  @media (max-width: 860px) { .focused-grid { flex-direction: column; } }
 
   .narrative-panel { max-height: 480px; overflow-y: auto; }
   .scene { font-family: var(--serif); color: var(--narrative-ink); border-left: 2px solid #3a4c5c; padding: 0.15rem 0 0.15rem 0.9rem; margin-bottom: 1rem; }
@@ -70,7 +71,9 @@
   .scene-tick { font-family: var(--mono); font-size: 0.7rem; color: var(--text-faint); margin-bottom: 0.25rem; letter-spacing: 0.03em; }
   .empty-note { color: var(--text-faint); font-style: italic; font-family: var(--serif); }
 
-  .side-stack { display: flex; flex-direction: column; gap: 1.25rem; }
+  /* ---------- highlights | events, side by side ---------- */
+  .feeds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; align-items: start; }
+  @media (max-width: 860px) { .feeds-grid { grid-template-columns: 1fr; } }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 1rem; font-size: 0.88rem; }
   .kv dt { color: var(--text-muted); }
   .kv dd { margin: 0; text-align: right; color: var(--text); }
@@ -83,6 +86,12 @@
   .hatch-actions button { background: #17222c; border-color: #2f4e66; font-size: 0.8rem; }
   .hatch-actions button:hover { background: #1f3242; }
   #actionFeedback { color: #6ee7a8; font-size: 0.78rem; margin-top: 0.5rem; min-height: 1em; }
+
+  /* ---------- map (ported layout, no library - same posture as sparklines) ---------- */
+  #mapSvg { width: 100%; height: 340px; display: block; }
+  .map-legend { display: flex; gap: 1.2rem; font-size: 0.72rem; color: var(--text-faint); margin-top: 0.4rem; flex-wrap: wrap; }
+  .map-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .map-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 
   /* ---------- societies (v3 Phase 2: cards double as the switcher) ---------- */
   .societies { display: flex; flex-wrap: wrap; gap: 1rem; }
@@ -118,6 +127,8 @@
   .specialty-count { width: 24px; text-align: right; color: var(--text-faint); }
   .crowd-total { color: var(--text-muted); font-size: 0.85rem; }
   .crowd-total b { color: var(--text); }
+  .crowd-names { flex-basis: 100%; font-size: 0.76rem; color: var(--text-faint); }
+  .crowd-names b { color: var(--text-muted); }
 
   /* ---------- events ---------- */
   .events-feed { font-size: 0.85rem; }
@@ -159,42 +170,54 @@
 </div>
 
 <h2>societies</h2>
-<div class="societies panel-row" id="societies"></div>
+<div class="societies" id="societies"></div>
 
-<div class="main-grid">
-  <div>
-    <h2>what's happening</h2>
-    <div class="panel narrative-panel" id="narrative"><div class="empty-note">no scenes written yet</div></div>
-  </div>
-
-  <div class="side-stack">
-    <div>
-      <h2 id="settlementLabel">the settlement</h2>
-      <div class="panel" id="settlement"></div>
-    </div>
-    <div>
-      <h2 id="hatchLabel">the hatch (you)</h2>
-      <div class="panel">
-        <div class="kv" id="hatchMeta"></div>
-        <div class="hatch-inventory" id="hatchInventory"></div>
-        <div class="hatch-actions" id="hatchActions"></div>
-        <div id="actionFeedback"></div>
-      </div>
-    </div>
+<h2>the map</h2>
+<div class="panel">
+  <svg id="mapSvg" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid meet"></svg>
+  <div class="map-legend">
+    <span><span class="map-dot" style="background:#c1685a"></span>contested node</span>
+    <span><span class="map-dot" style="background:#7c8695"></span>society home node (ring color = that society)</span>
+    <span><span class="map-dot" style="background:#fff"></span>your hatch</span>
   </div>
 </div>
 
-<h2>leads</h2>
-<div class="leads panel-row" id="leads"></div>
+<div class="focused-grid">
+  <div>
+    <h2 id="settlementLabel">the settlement</h2>
+    <div class="panel" id="settlement"></div>
+  </div>
+  <div>
+    <h2 id="hatchLabel">the hatch (you)</h2>
+    <div class="panel">
+      <div class="kv" id="hatchMeta"></div>
+      <div class="hatch-inventory" id="hatchInventory"></div>
+      <div class="hatch-actions" id="hatchActions"></div>
+      <div id="actionFeedback"></div>
+    </div>
+  </div>
+  <div>
+    <h2 id="leadsLabel">the lead</h2>
+    <div class="leads" id="leads"></div>
+  </div>
+</div>
+
+<h2>what's happening</h2>
+<div class="panel narrative-panel" id="narrative"><div class="empty-note">no scenes written yet</div></div>
 
 <h2>the crowd</h2>
 <div class="panel crowd-panel" id="crowd"><span class="crowd-total">loading…</span></div>
 
-<h2>highlights</h2>
-<div class="panel events-feed" id="highlights"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
-
-<h2>events</h2>
-<div class="panel events-feed" id="events"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
+<div class="feeds-grid">
+  <div>
+    <h2>highlights</h2>
+    <div class="panel events-feed" id="highlights"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
+  </div>
+  <div>
+    <h2>events</h2>
+    <div class="panel events-feed" id="events"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
+  </div>
+</div>
 
 <h2>raw feed</h2>
 <div id="log"></div>
@@ -275,6 +298,105 @@
     container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${line}" fill="none" stroke="#6ee7a8" stroke-width="1.6" /></svg>`;
   }
 
+  // ---------- map (ported from v1's layout.py/render.py, no library) ----------
+  // v1's layout.py picked a plain circular layout on purpose over a
+  // force-directed one - "worth it later only if a circle turns out to
+  // look bad, not before." Same judgment call still applies; ported as-is.
+  let worldNodes = [];
+  let worldEdges = [];
+  let nodePositions = {}; // node id -> {x, y} in [-1, 1] space
+  // Wider than tall (matches the panel's real aspect ratio better than a
+  // square did) - the layout algorithm itself is unchanged, only the
+  // screen remap below stretches horizontally.
+  const MAP_W = 480;
+  const MAP_H = 220;
+  const MAP_PAD = 20;
+  const RESOURCE_COLORS = { ore: "#8fd3ff", food: "#6ee7a8", wood: "#d9a860", tool: "#c1685a" };
+  const SOCIETY_COLORS = ["#8fd3ff", "#d9a860", "#c98fdb", "#6ee7a8"];
+
+  function computeLayout() {
+    const n = worldNodes.length;
+    nodePositions = {};
+    worldNodes.forEach((node, i) => {
+      const angle = (2 * Math.PI * i) / n;
+      nodePositions[node.id] = { x: Math.cos(angle), y: Math.sin(angle) };
+    });
+  }
+
+  // Same affine remap as v1's render.py::to_screen, into an SVG viewBox
+  // instead of a pygame surface.
+  function toScreen(pos) {
+    const usableW = MAP_W - 2 * MAP_PAD;
+    const usableH = MAP_H - 2 * MAP_PAD;
+    return {
+      x: MAP_PAD + ((pos.x + 1) / 2) * usableW,
+      y: MAP_PAD + ((pos.y + 1) / 2) * usableH,
+    };
+  }
+
+  async function fetchWorld() {
+    try {
+      const resp = await fetch("/world");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      worldNodes = data.nodes;
+      worldEdges = data.edges;
+      computeLayout();
+    } catch (e) {
+      // leave the map empty - topology is static, so a failed one-time
+      // fetch just means no map this session, not a broken live feed.
+    }
+  }
+
+  function societyColor(societyId, societies) {
+    const idx = societies.findIndex((s) => s.id === societyId);
+    return idx >= 0 ? SOCIETY_COLORS[idx % SOCIETY_COLORS.length] : "#4d5563";
+  }
+
+  function renderMap(snap) {
+    const svg = document.getElementById("mapSvg");
+    if (worldNodes.length === 0) return;
+    const societies = snap.societies || [];
+    const occByNode = {};
+    for (const o of snap.node_occupancy || []) occByNode[o.node] = o;
+    const homeNodeOf = {};
+    for (const s of societies) homeNodeOf[s.node] = s;
+
+    const parts = [];
+    for (const e of worldEdges) {
+      const p1 = toScreen(nodePositions[e.a]);
+      const p2 = toScreen(nodePositions[e.b]);
+      parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="#232a35" stroke-width="1" />`);
+    }
+    for (const node of worldNodes) {
+      const pos = nodePositions[node.id];
+      if (!pos) continue;
+      const p = toScreen(pos);
+      const occ = occByNode[node.id];
+      // Contention (Phase 3/4's actual drama signal) takes priority over
+      // the persistent home-node marker - a node can be both, and
+      // "something's happening here right now" is the more urgent fact.
+      const contested = occ && occ.societies && occ.societies.length > 1;
+      const home = homeNodeOf[node.id];
+      const fill = RESOURCE_COLORS[node.resource_type] || "#4d5563";
+      const ring = contested
+        ? 'stroke="#c1685a" stroke-width="2.5"'
+        : home
+        ? `stroke="${societyColor(home.id, societies)}" stroke-width="2"`
+        : "";
+      parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="5" fill="${fill}" ${ring} />`);
+      if (occ && occ.total > 0) {
+        parts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="6" text-anchor="middle" fill="#7c8695">${occ.total}</text>`);
+      }
+    }
+    const focused = societies.find((s) => s.id === snap.possessed_society);
+    if (focused && focused.hatch && focused.hatch.alive && nodePositions[focused.hatch.location]) {
+      const p = toScreen(nodePositions[focused.hatch.location]);
+      parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#fff" stroke="#6ee7a8" stroke-width="1.5" />`);
+    }
+    svg.innerHTML = parts.join("");
+  }
+
   // ---------- panel renderers ----------
   function renderLeads(leads) {
     const container = document.getElementById("leads");
@@ -305,11 +427,15 @@
     container.innerHTML = (societies || []).map((s) => {
       const isPossessed = s.id === possessed;
       const hungerWarn = s.avg_hunger >= 50;
+      // "who's actually here", not just a population count - Society.roster
+      // existed server-side already, just wasn't resolved into names before.
+      const rosterNames = (s.roster || []).map((r) => `${escapeHtml(r.display_name || r.id)}${r.alive ? "" : " †"}`).join(", ");
       return `<button class="panel society-card${isPossessed ? " possessed" : ""}" onclick="possessSociety('${s.id}')">
         <div class="society-id">${escapeHtml(s.id)}${isPossessed ? '<span class="possessed-tag">possessed</span>' : ""}</div>
         <div class="society-meta">at ${escapeHtml(s.node)} · pop ${s.population_alive}/${s.roster_size}</div>
         <div class="society-meta">energy ${s.avg_energy.toFixed(1)} · hunger <span class="${hungerWarn ? "warn" : ""}">${s.avg_hunger.toFixed(1)}</span></div>
         <div class="society-meta">food ${s.total_food_held.toFixed(1)}</div>
+        <div class="society-meta">${rosterNames}</div>
       </button>`;
     }).join("");
   }
@@ -349,6 +475,8 @@
       <dt>hunger</dt><dd>${h.hunger.toFixed(0)}</dd>
       <dt>status</dt><dd>${h.alive ? "alive" : "dead"}</dd>
       <dt>hunger scares</dt><dd>${h.hunger_scares_witnessed}</dd>
+      <dt>trade success</dt><dd>${h.trade_success_ratio == null ? "n/a" : `${Math.round(h.trade_success_ratio * 100)}%`}</dd>
+      <dt>caution</dt><dd>${Math.round(((h.caution_bias || 0) * 100) / 0.9)}%</dd>
     `;
     const inv = h.inventory || {};
     const parts = Object.entries(inv).filter(([, v]) => v > 0.01).map(([k, v]) => `${v.toFixed(1)} ${k}`);
@@ -434,9 +562,17 @@
           <span class="specialty-count">${n}</span>
         </div>
       `).join("");
+      // display_name was already in this same /agents response - it just
+      // wasn't rendered per-agent before, only folded into the aggregate
+      // bars above.
+      const bySpecialty = {};
+      for (const a of alive) (bySpecialty[a.specialty] ??= []).push(a.display_name || a.id);
+      const names = Object.entries(bySpecialty).sort((a, b) => b[1].length - a[1].length)
+        .map(([spec, names]) => `<div><b>${escapeHtml(spec)}:</b> ${names.map(escapeHtml).join(", ")}</div>`).join("");
       container.innerHTML = `
         <div class="specialty-bars">${bars}</div>
         <div class="crowd-total"><b>${alive.length}</b> / ${crowd.length} crowd agents alive</div>
+        <div class="crowd-names">${names}</div>
       `;
     } catch (e) {
       container.innerHTML = '<span class="crowd-total">(disconnected from service)</span>';
@@ -472,12 +608,14 @@
     renderSocieties(societies, snap.possessed_society);
     document.getElementById("settlementLabel").textContent = focused ? `the settlement (${focused.id})` : "the settlement";
     document.getElementById("hatchLabel").textContent = focused ? `the hatch (you, ${focused.id})` : "the hatch (you)";
+    document.getElementById("leadsLabel").textContent = focused ? `the lead (${focused.id})` : "the lead";
     renderSettlement(focused);
     renderHatchMeta(focused && focused.hatch);
     renderLeads((snap.leads || []).filter((l) => focused && l.id === focused.lead_id));
     renderNarrative(snap.narrative);
     renderEvents(snap.events);
     renderHighlights(snap.highlights);
+    renderMap(snap);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");
@@ -543,6 +681,7 @@
   document.getElementById("connectBtn").onclick = connect;
   document.getElementById("disconnectBtn").onclick = disconnect;
   connect();
+  fetchWorld();
   refreshHatchActions();
   refreshCrowd();
   setInterval(refreshHatchActions, 3000);

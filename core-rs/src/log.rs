@@ -76,7 +76,11 @@ impl JsonlWriter {
         JsonlWriter { writer: BufWriter::new(file) }
     }
 
-    pub fn write(&mut self, entry: &TickLogEntry) {
+    /// Generic over T rather than tied to TickLogEntry - lets a caller with
+    /// extra context (e.g. serve_main.rs's society lookup) write an enriched
+    /// value through the same writer, without TickLogEntry itself needing to
+    /// know about anything outside the tick engine.
+    pub fn write<T: Serialize>(&mut self, entry: &T) {
         let line = serde_json::to_string(entry).expect("log entry must serialize");
         writeln!(self.writer, "{line}").expect("write to log file");
     }

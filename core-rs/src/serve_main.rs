@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,6 +41,10 @@ struct Args {
     postgres_url: Option<String>,
     run_id: Option<String>,
     societies: usize,
+    // Cheap, opt-in per-society population/health trend over time - a
+    // long unattended run without this has no way to reconstruct when
+    // each society actually declined, only a before/after snapshot.
+    society_stats_csv: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -60,6 +65,7 @@ fn parse_args() -> Args {
         // every society exactly one lead with no new goals/personalities
         // needed yet.
         societies: 3,
+        society_stats_csv: None,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -117,6 +123,10 @@ fn parse_args() -> Args {
                 a.societies = argv[i + 1].parse().expect("--societies must be an integer");
                 i += 2;
             }
+            "--society-stats-csv" => {
+                a.society_stats_csv = Some(argv[i + 1].clone());
+                i += 2;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -151,6 +161,10 @@ struct Snapshot {
     // small and separate so the rarer, more interesting moments don't have
     // to compete with routine activity for the same slots.
     highlights: Vec<serde_json::Value>,
+    // Viewer pass: which societies are present at each occupied node, right
+    // now - a node is contested exactly when societies.len() > 1. Only
+    // nodes with 1+ living agents are included, keeping this small.
+    node_occupancy: Vec<serde_json::Value>,
 }
 
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
@@ -209,6 +223,10 @@ struct SimState {
     // full_log opts into logging every tier, once disk headroom allows it.
     log_writer: Option<JsonlWriter>,
     full_log: bool,
+    // Opt-in, cheap: one row per society every stats_every_secs, reusing
+    // build_society_view - a population/health trend over time that costs
+    // almost nothing, independent of whether --full-log or Postgres are on.
+    society_stats_csv: Option<std::fs::File>,
     stats_every_secs: u64,
     last_stats_write: std::time::Instant,
     // Phase 4: periodic scene-writing from the sidecar, capped rolling feed -
@@ -326,10 +344,17 @@ fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
     let avg_hunger = if population_alive > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population_alive as f64 } else { 0.0 };
     let total_food_held: f64 = alive.iter().map(|a| a.held(ResourceType::Food)).sum();
     let hatch = sim.agents.iter().find(|a| a.id == society.hatch_id).map(|a| a.public_view());
+    // Viewer pass: resolved roster members ("who's actually here"), not just
+    // a count - same cost as the population_alive/avg_energy computation
+    // above, since `roster` is already the resolved Vec<&AgentState>.
+    let roster_view: Vec<serde_json::Value> = roster.iter().map(|a| serde_json::json!({
+        "id": a.id, "display_name": a.display_name, "alive": a.alive,
+    })).collect();
     serde_json::json!({
         "id": society.id,
         "node": society.home_node,
         "roster_size": roster_size,
+        "roster": roster_view,
         "population_alive": population_alive,
         "avg_energy": avg_energy,
         "avg_hunger": avg_hunger,
@@ -337,6 +362,27 @@ fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
         "hatch": hatch,
         "lead_id": society.lead_id,
     })
+}
+
+/// Viewer pass: per-occupied-node society presence, for the map's live
+/// contention highlighting. Reuses society_of (Phase 4) - a node is
+/// contested exactly when 2+ distinct real societies are both present.
+fn build_node_occupancy(sim: &SimState) -> Vec<serde_json::Value> {
+    let mut by_node: HashMap<String, (i32, std::collections::HashSet<String>)> = HashMap::new();
+    for a in sim.agents.iter().filter(|a| a.alive) {
+        let entry = by_node.entry(a.location.clone()).or_insert_with(|| (0, std::collections::HashSet::new()));
+        entry.0 += 1;
+        if let Some(soc) = society_of(sim, &a.id) {
+            entry.1.insert(soc.id.clone());
+        }
+    }
+    by_node.into_iter().map(|(node, (total, societies))| {
+        serde_json::json!({
+            "node": node,
+            "total": total,
+            "societies": societies.into_iter().collect::<Vec<_>>(),
+        })
+    }).collect()
 }
 
 fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
@@ -362,6 +408,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         narrative: sim.narrative_feed.iter().cloned().collect(),
         events: sim.notable_events.iter().cloned().collect(),
         highlights: sim.highlights.iter().cloned().collect(),
+        node_occupancy: build_node_occupancy(sim),
     }
 }
 
@@ -454,6 +501,13 @@ async fn main() {
     // the operator actually calls POST /player/possess/:society_id.
     let possessed_society = societies[0].id.clone();
 
+    let society_stats_csv = a.society_stats_csv.as_deref().map(|p| {
+        let mut f = std::fs::File::create(p).expect("cannot create society stats csv");
+        writeln!(f, "tick,ts,society_id,node,population_alive,roster_size,avg_energy,avg_hunger,total_food_held")
+            .expect("write society stats csv header");
+        f
+    });
+
     let sim = SimState {
         world,
         agents,
@@ -466,6 +520,7 @@ async fn main() {
         pending_intents: HashMap::new(),
         log_writer: a.log_path.as_deref().map(JsonlWriter::new),
         full_log: a.full_log,
+        society_stats_csv,
         stats_every_secs: a.stats_every_secs,
         last_stats_write: std::time::Instant::now(),
         narrative_feed: std::collections::VecDeque::new(),
@@ -600,10 +655,21 @@ async fn main() {
                     let full_log = sim.full_log;
                     let keep = |e: &seam_core::log::TickLogEntry| full_log || e.tier == "lead" || e.action == "DEATH";
 
-                    if let Some(writer) = sim.log_writer.as_mut() {
-                        for e in &entries {
-                            if keep(e) {
-                                writer.write(e);
+                    if sim.log_writer.is_some() {
+                        // Ground-truth society tagging, not inferred after the
+                        // fact - the location-clustering heuristic analysis
+                        // scripts need otherwise needed two real bug fixes
+                        // this session to get right. Built before the mutable
+                        // borrow below so society_of's shared borrow of sim
+                        // doesn't overlap with it.
+                        let enriched: Vec<serde_json::Value> = entries.iter().filter(|e| keep(e)).map(|e| {
+                            let mut v = serde_json::to_value(e).expect("log entry must serialize");
+                            v["society"] = serde_json::json!(society_of(sim, &e.agent_id).map(|s| s.id.clone()));
+                            v
+                        }).collect();
+                        if let Some(writer) = sim.log_writer.as_mut() {
+                            for v in &enriched {
+                                writer.write(v);
                             }
                         }
                     }
@@ -653,6 +719,25 @@ async fn main() {
                                 });
                             }
                         }
+
+                        if sim.society_stats_csv.is_some() {
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                            let rows: Vec<String> = sim.societies.iter().map(|society| {
+                                let sv = build_society_view(sim, society);
+                                format!(
+                                    "{},{},{},{},{},{},{},{},{}",
+                                    tick, ts, sv["id"].as_str().unwrap_or(""), sv["node"].as_str().unwrap_or(""),
+                                    sv["population_alive"].as_i64().unwrap_or(0), sv["roster_size"].as_i64().unwrap_or(0),
+                                    sv["avg_energy"].as_f64().unwrap_or(0.0), sv["avg_hunger"].as_f64().unwrap_or(0.0),
+                                    sv["total_food_held"].as_f64().unwrap_or(0.0),
+                                )
+                            }).collect();
+                            if let Some(f) = sim.society_stats_csv.as_mut() {
+                                for row in rows {
+                                    writeln!(f, "{row}").expect("write society stats csv row");
+                                }
+                            }
+                        }
                     }
 
                     build_snapshot(sim, state.started_at)
@@ -671,6 +756,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index_page))
         .route("/state", get(get_state))
+        .route("/world", get(get_world))
         .route("/ws", get(ws_handler))
         .route("/agents", get(get_agents))
         .route("/leads", get(get_leads))
@@ -694,6 +780,34 @@ async fn main() {
 async fn get_state(State(state): State<Arc<AppState>>) -> Json<Snapshot> {
     let sim = state.sim.lock().unwrap();
     Json(build_snapshot(&sim, state.started_at))
+}
+
+/// Viewer pass: the graph's topology - deliberately excludes quantity/
+/// signals (which change every tick) so the viewer only ever needs to
+/// fetch this once at page load, not poll it, same reasoning /agents is
+/// fetched on its own slower cadence rather than folded into the tick
+/// stream. Edges are deduped by only including them from their "a" side's
+/// adjacency list - add_edge stores the same Edge{a,b,cost} under both
+/// endpoints, so filtering to where the current node equals edge.a is
+/// enough to avoid emitting each edge twice.
+async fn get_world(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sim = state.sim.lock().unwrap();
+    let nodes: Vec<serde_json::Value> = sim.world.node_order.iter().map(|id| {
+        let node = &sim.world.nodes[id];
+        serde_json::json!({
+            "id": node.id,
+            "resource_type": node.resource_type.map(|r| r.as_str()),
+        })
+    }).collect();
+    let mut edges: Vec<serde_json::Value> = Vec::new();
+    for node_id in &sim.world.node_order {
+        for edge in sim.world.neighbors(node_id) {
+            if &edge.a == node_id {
+                edges.push(serde_json::json!({ "a": edge.a, "b": edge.b }));
+            }
+        }
+    }
+    Json(serde_json::json!({ "nodes": nodes, "edges": edges }))
 }
 
 /// Read from disk on every request rather than baked in at compile time -

@@ -55,7 +55,17 @@ def society_clusters(entries: list[dict]) -> dict[str, str]:
     nodes are identified by presence of a hatch/lead id there, not by
     cluster size - a random crowd-only collision can never include one,
     since hatches/leads aren't part of spawn_agents' random pool at all.
+
+    Superseded, when present, by ground-truth: logs written after the
+    serve_main.rs society-tagging change carry a real "society" field on
+    every entry (via the same society_of() the sim itself uses) - no
+    clustering or guessing needed at all. Older logs (e.g. everything from
+    Phase 3) don't have it, so the heuristic below stays as a fallback.
     """
+    ground_truth = {e["agent_id"]: e["society"] for e in entries if e.get("society")}
+    if ground_truth:
+        return ground_truth
+
     first_loc: dict[str, str] = {}
     for e in entries:
         aid = e["agent_id"]
