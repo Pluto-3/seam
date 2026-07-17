@@ -1,2 +1,10 @@
 pygame
 psycopg2-binary
+
+# offline analysis tooling only (analyze_*.py) - the sim/exporters
+# themselves stay stdlib-only, this is a deliberate, confirmed exception
+numpy
+networkx
+scipy
+ruptures
+vaderSentiment
