@@ -101,7 +101,16 @@ def _order_multiplier(node: Node, resource_type: ResourceType) -> float:
 def _bfs_next_hop_to_food(agent: AgentState, world: World) -> Optional[str]:
     """First-hop neighbor on the shortest (unweighted) path to the nearest node
     with food currently available. None if already standing on one, or none
-    is reachable at all."""
+    is reachable at all.
+
+    TODO: this has the same congestion-blindness bug fixed in core-rs's
+    decide.rs::bfs_next_hop_to_food (see that file's comment + ANALYSIS.md
+    angle 6) - returns the *nearest* food node regardless of how congested
+    it already is, which let one node become a self-reinforcing trap
+    (42-92% of all activity, 100% of deaths, across real runs). Not fixed
+    here since this module isn't part of the active serve/run runtime
+    (core-rs is) - flagged so the two don't silently drift further apart,
+    not because it's urgent to port back."""
     start = agent.location
     start_node = world.nodes[start]
     if start_node.resource_type == ResourceType.FOOD and start_node.quantity > 0:

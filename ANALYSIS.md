@@ -298,6 +298,36 @@ this is a candidate mechanical improvement (factor current congestion
 into food-seeking, not just distance/availability), not just an analysis
 finding.
 
+**Follow-up, 2026-07-17: the fix attempted from this finding didn't work,
+and the real reason is now understood.** Made `bfs_next_hop_to_food`
+congestion-aware (scores every reachable food node by
+`congestion_factor(node) * MOVE_LOOKAHEAD_DISCOUNT^hops` instead of
+returning the first one found), verified correct in isolation with new
+unit tests (nearer wins when clear, farther wins when the nearer one is
+congested — both pass). Live-verified against a fresh run at the same
+seed/scale as the original finding: **87.6% (before) vs. 87.5% (after) —
+no real change**, identical death count (23 both times). Not reported as
+a fix.
+
+Investigated why rather than move on: checked hunger levels at every
+n13 action in the fixed run. **All 46 agents pass through n13, but average
+hunger while acting there is 8.15 — and only 0.8% of n13's traffic happens
+above the 60.0 emergency-hunger threshold** that gates the code path just
+fixed. The emergency long-range BFS is a rare safety net, not what's
+driving n13's dominance. The actual traffic is normal, everyday foraging —
+agents arrive and *stay*, routed there by the ordinary 1-hop lookahead
+(`best_local_score`/`congestion_factor` in the *existing*, already-
+congestion-aware scoring path, never touched by this fix) rather than the
+long-range emergency path. The real question this reframes: why does the
+existing congestion discount fail to push agents toward the four
+alternative food nodes even under normal (non-emergency) decision-making —
+is `CONGESTION_WEIGHT` too weak, or are the alternatives simply too many
+hops away for a 1-hop-lookahead decision to ever see them as competitive
+with "some food chance right here"? Not yet answered — the emergency-path
+fix stays in the codebase (it's a real, tested, small improvement for the
+narrow case it covers) but doesn't get to claim credit for solving the
+n13 problem.
+
 ### Angle 4: The craft/tool economy — the single strongest effect found this whole pass
 
 `analyze_craft_economy.py`. Never analyzed before this session despite

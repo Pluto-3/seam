@@ -92,10 +92,23 @@ fn order_multiplier(node: &Node, resource_type: ResourceType) -> f64 {
     }
 }
 
-/// First-hop neighbor on the shortest (unweighted) path to the nearest node
-/// with food currently available. None if already standing on one, or none
-/// is reachable at all.
-fn bfs_next_hop_to_food(agent: &AgentState, world: &World) -> Option<String> {
+/// First-hop neighbor toward the *best* reachable food node - best meaning
+/// the highest congestion_factor(node) * MOVE_LOOKAHEAD_DISCOUNT^hops, the
+/// same congestion-penalty shape and per-distance discount already used
+/// everywhere else in this file, not necessarily the nearest by hop count.
+/// None if already standing on a food node, or none is reachable at all.
+///
+/// Previously returned the *first* food node BFS encountered - nearest by
+/// hop count, with zero awareness of how congested it already was. That
+/// let a single node become a self-reinforcing trap: once agents started
+/// piling onto it, congestion crushed its effective gather success, but
+/// every other hungry agent still got routed straight at it anyway, because
+/// it was still "nearest with food > 0." Confirmed against real multi-run
+/// data (ANALYSIS.md angle 6) before changing this - one node accounted for
+/// 42-92% of all activity and 100% of all deaths across three runs, with an
+/// 11.5% gather success rate vs. 97-100% at four equally-typed alternatives
+/// a few hops away.
+fn bfs_next_hop_to_food(agent: &AgentState, world: &World, node_occupancy: &HashMap<String, i32>) -> Option<String> {
     let start = agent.location.clone();
     let start_node = &world.nodes[&start];
     if start_node.resource_type == Some(ResourceType::Food) && start_node.quantity > 0.0 {
@@ -105,19 +118,26 @@ fn bfs_next_hop_to_food(agent: &AgentState, world: &World) -> Option<String> {
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     visited.insert(start.clone());
 
-    let mut queue: VecDeque<(String, String)> = VecDeque::new();
+    // (node_id, first_hop, hop_distance) - unlike the old version this
+    // doesn't return on the first food node found, it keeps searching the
+    // whole reachable component (small graph, no need to bound the radius)
+    // and scores every candidate found.
+    let mut queue: VecDeque<(String, String, u32)> = VecDeque::new();
     for edge in world.neighbors(&start) {
         let n = edge.other(&start);
-        queue.push_back((n.clone(), n));
-    }
-    for (_, first_hop) in queue.iter() {
-        visited.insert(first_hop.clone());
+        queue.push_back((n.clone(), n.clone(), 1));
+        visited.insert(n);
     }
 
-    while let Some((current, first_hop)) = queue.pop_front() {
+    let mut best: Option<(String, f64)> = None; // (first_hop, score)
+
+    while let Some((current, first_hop, dist)) = queue.pop_front() {
         let node = &world.nodes[&current];
         if node.resource_type == Some(ResourceType::Food) && node.quantity > 0.0 {
-            return Some(first_hop);
+            let score = congestion_factor(&current, agent, node_occupancy) * C::MOVE_LOOKAHEAD_DISCOUNT.powf(dist as f64);
+            if best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
+                best = Some((first_hop.clone(), score));
+            }
         }
         for edge in world.neighbors(&current) {
             let nxt = edge.other(&current);
@@ -125,10 +145,10 @@ fn bfs_next_hop_to_food(agent: &AgentState, world: &World) -> Option<String> {
                 continue;
             }
             visited.insert(nxt.clone());
-            queue.push_back((nxt, first_hop.clone()));
+            queue.push_back((nxt, first_hop.clone(), dist + 1));
         }
     }
-    None
+    best.map(|(first_hop, _)| first_hop)
 }
 
 fn can_signal(agent: &AgentState, node: &Node, kind: &str, tick: i64) -> bool {
@@ -302,7 +322,7 @@ pub fn generate_candidates(
     // toward food that the 1-hop lookahead alone could never see.
     let mut emergency_hop: Option<String> = None;
     if agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD && agent.held(ResourceType::Food) < C::TRADE_MIN_HELD {
-        emergency_hop = bfs_next_hop_to_food(agent, world);
+        emergency_hop = bfs_next_hop_to_food(agent, world, node_occupancy);
     }
 
     for edge in world.neighbors(&agent.location) {
@@ -348,4 +368,61 @@ pub fn choose_action(
         }
     }
     best_intent.unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// start -o- near (food, 1 hop) and start -o- mid -o- far (food, 2 hops).
+    /// The first bfs_next_hop_to_food test this function has ever had -
+    /// nothing existing to preserve, but the two cases that actually matter
+    /// for the fix: unchanged behavior when there's nothing to route
+    /// around, and the new behavior (routing past a nearer-but-congested
+    /// node) when there is.
+    fn two_food_node_world() -> World {
+        let mut w = World::new();
+        w.add_node(Node { id: "start".into(), resource_type: Some(ResourceType::Ore), quantity: 10.0, max_quantity: 10.0, regen_rate: 0.0, signals: vec![] });
+        w.add_node(Node { id: "near".into(), resource_type: Some(ResourceType::Food), quantity: 10.0, max_quantity: 10.0, regen_rate: 0.0, signals: vec![] });
+        w.add_node(Node { id: "mid".into(), resource_type: Some(ResourceType::Ore), quantity: 10.0, max_quantity: 10.0, regen_rate: 0.0, signals: vec![] });
+        w.add_node(Node { id: "far".into(), resource_type: Some(ResourceType::Food), quantity: 10.0, max_quantity: 10.0, regen_rate: 0.0, signals: vec![] });
+        w.add_edge("start", "near", 1.0);
+        w.add_edge("start", "mid", 1.0);
+        w.add_edge("mid", "far", 1.0);
+        w
+    }
+
+    fn hungry_agent() -> AgentState {
+        AgentState::new("a0".into(), "start".into(), 50.0, 90.0, ResourceType::Ore)
+    }
+
+    #[test]
+    fn picks_nearer_food_node_when_uncongested() {
+        let world = two_food_node_world();
+        let agent = hungry_agent();
+        let occupancy: HashMap<String, i32> = HashMap::new();
+        // "near" (1 hop) should beat "far" (2 hops) when nothing is congested -
+        // same behavior as before this fix, not just a new one.
+        assert_eq!(bfs_next_hop_to_food(&agent, &world, &occupancy), Some("near".to_string()));
+    }
+
+    #[test]
+    fn routes_around_a_congested_nearer_node() {
+        let world = two_food_node_world();
+        let agent = hungry_agent();
+        let mut occupancy: HashMap<String, i32> = HashMap::new();
+        // Heavy congestion at the nearer food node should push the agent
+        // toward the farther-but-clear one instead - the actual bug fix.
+        occupancy.insert("near".to_string(), 20);
+        assert_eq!(bfs_next_hop_to_food(&agent, &world, &occupancy), Some("mid".to_string()));
+    }
+
+    #[test]
+    fn none_when_already_on_food() {
+        let world = two_food_node_world();
+        let mut agent = hungry_agent();
+        agent.location = "near".to_string();
+        let occupancy: HashMap<String, i32> = HashMap::new();
+        assert_eq!(bfs_next_hop_to_food(&agent, &world, &occupancy), None);
+    }
 }
