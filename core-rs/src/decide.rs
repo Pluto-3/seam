@@ -353,21 +353,113 @@ pub fn choose_action(
     node_occupancy: &HashMap<String, i32>,
     trade_enabled: bool,
 ) -> Intent {
+    choose_action_with_debug(agent, world, colocated, tick, rng, node_occupancy, trade_enabled).0
+}
+
+/// Decision-time diagnostics for the n13-style congestion-trap investigation
+/// (ANALYSIS.md angle 6): the emergency-routing fix turned out to touch only
+/// 0.8% of the traffic actually driving a hotspot node's dominance - the
+/// other 99.2% is ordinary, non-emergency GATHER-vs-MOVE scoring, and there
+/// was no way to see *why* that scoring keeps choosing the congested node
+/// short of re-deriving it from raw candidate scores after the fact. These
+/// fields make the two live hypotheses (congestion penalty too weak vs.
+/// better nodes structurally invisible to a 1-hop lookahead) directly
+/// checkable from the log instead of guessed at.
+#[derive(Clone, Debug, Serialize)]
+pub struct DecisionDebug {
+    /// Pre-jitter score of the GATHER-here candidate, if one was generated.
+    pub gather_score: Option<f64>,
+    /// Pre-jitter score of the single best MOVE candidate, whatever its target.
+    pub best_move_score: Option<f64>,
+    pub best_move_target: Option<String>,
+    /// Pre-jitter score of the best MOVE candidate whose target is itself a
+    /// food node - the specific comparison that tests whether a nearby food
+    /// alternative was ever competitive, or invisible/losing by construction.
+    pub best_food_move_score: Option<f64>,
+    pub best_food_move_target: Option<String>,
+    /// Pre-jitter score of whichever candidate actually won (post-jitter argmax).
+    pub chosen_score: f64,
+    pub candidate_count: usize,
+    pub location_occupancy: i32,
+    pub location_congestion: f64,
+    pub hunger: f64,
+    pub specialty: String,
+    /// Whether this tick's hunger/food-held state even qualifies for the
+    /// long-range emergency BFS bonus - lets "was congestion-aware routing
+    /// even in play this tick" be answered directly instead of inferred.
+    pub emergency_eligible: bool,
+}
+
+pub fn choose_action_with_debug(
+    agent: &AgentState,
+    world: &World,
+    colocated: &[&AgentState],
+    tick: i64,
+    rng: &mut impl Rng,
+    node_occupancy: &HashMap<String, i32>,
+    trade_enabled: bool,
+) -> (Intent, DecisionDebug) {
     let candidates = generate_candidates(agent, world, colocated, tick, node_occupancy, trade_enabled);
-    if candidates.is_empty() {
-        return Intent::new("REST");
-    }
-    let mut best_score: Option<f64> = None;
-    let mut best_intent: Option<Intent> = None;
-    for (score, intent) in candidates {
-        let jitter = rng.gen_range(-C::JITTER..=C::JITTER);
-        let jittered = score * (1.0 + jitter);
-        if best_score.is_none() || jittered > best_score.unwrap() {
-            best_score = Some(jittered);
-            best_intent = Some(intent);
+
+    let gather_score = candidates.iter().find(|(_, i)| i.action == "GATHER").map(|(s, _)| *s);
+
+    let best_move = candidates
+        .iter()
+        .filter(|(_, i)| i.action == "MOVE")
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let best_move_score = best_move.map(|(s, _)| *s);
+    let best_move_target = best_move.and_then(|(_, i)| i.target.clone());
+
+    let best_food_move = candidates
+        .iter()
+        .filter(|(_, i)| i.action == "MOVE")
+        .filter(|(_, i)| {
+            i.target
+                .as_ref()
+                .and_then(|t| world.nodes.get(t))
+                .map(|n| n.resource_type == Some(ResourceType::Food))
+                .unwrap_or(false)
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let best_food_move_score = best_food_move.map(|(s, _)| *s);
+    let best_food_move_target = best_food_move.and_then(|(_, i)| i.target.clone());
+
+    let candidate_count = candidates.len();
+
+    let (chosen_intent, chosen_score) = if candidates.is_empty() {
+        (Intent::new("REST"), 0.0)
+    } else {
+        let mut best_score: Option<f64> = None;
+        let mut best_jittered: Option<f64> = None;
+        let mut best_intent: Option<Intent> = None;
+        for (score, intent) in candidates {
+            let jitter = rng.gen_range(-C::JITTER..=C::JITTER);
+            let jittered = score * (1.0 + jitter);
+            if best_jittered.is_none() || jittered > best_jittered.unwrap() {
+                best_jittered = Some(jittered);
+                best_score = Some(score);
+                best_intent = Some(intent);
+            }
         }
-    }
-    best_intent.unwrap()
+        (best_intent.unwrap(), best_score.unwrap())
+    };
+
+    let debug = DecisionDebug {
+        gather_score,
+        best_move_score,
+        best_move_target,
+        best_food_move_score,
+        best_food_move_target,
+        chosen_score,
+        candidate_count,
+        location_occupancy: *node_occupancy.get(&agent.location).unwrap_or(&0),
+        location_congestion: congestion_factor(&agent.location, agent, node_occupancy),
+        hunger: agent.hunger,
+        specialty: agent.specialty.as_str().to_string(),
+        emergency_eligible: agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD && agent.held(ResourceType::Food) < C::TRADE_MIN_HELD,
+    };
+
+    (chosen_intent, debug)
 }
 
 #[cfg(test)]

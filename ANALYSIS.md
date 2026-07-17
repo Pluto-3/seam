@@ -328,6 +328,38 @@ fix stays in the codebase (it's a real, tested, small improvement for the
 narrow case it covers) but doesn't get to claim credit for solving the
 n13 problem.
 
+**Follow-up, 2026-07-17 (same day): instrumented rather than guessed at
+again.** Both hypotheses above were untestable from the existing log —
+`generate_candidates`/`choose_action` computed every candidate's score
+every tick and threw all but the winner away. Added `DecisionDebug`
+(`decide.rs`), a per-agent-per-tick diagnostic record surfaced through a
+new `choose_action_with_debug` (the original `choose_action` now just
+calls it and discards the debug half — same RNG draws in the same order,
+so this is behavior-preserving, confirmed by all 4 existing tests still
+passing unchanged) and attached to logged entries as an enrichment field
+the same way `society` already is, in both `main.rs` and `serve_main.rs`.
+Carries, per decision: `gather_score` (the GATHER-here candidate),
+`best_move_score`/`best_move_target` (the best MOVE anywhere),
+`best_food_move_score`/`best_food_move_target` (the best MOVE
+specifically toward a food-typed neighbor — the exact comparison that
+tests hypothesis (b): if this is consistently `None` at n13, the better
+alternatives are structurally invisible to a 1-hop lookahead, not merely
+outscored), `chosen_score`, `candidate_count`, `location_occupancy`/
+`location_congestion` (tests hypothesis (a): does `gather_score` still
+win by a landslide even at high congestion), `hunger`, `specialty`
+(closes the "specialty is never logged" gap below as a side effect, one
+per-action snapshot rather than a dedicated roster record but real data
+either way), and `emergency_eligible` (was this tick's routing even
+subject to the fix above). Absent (not null-filled) on `DEATH` entries
+and LLM-overridden lead ticks, since no candidate scoring happened for
+either. Verified live on a fresh 200-tick run: the field appears on every
+non-DEATH entry, a sampled GATHER-at-n14 entry showed `gather_score`
+(5.26) beating `best_food_move_score` (2.25) exactly as expected, and
+`analyze_node_hotspots.py` ran against the enriched log unmodified — this
+is additive, not a breaking change to the log format. Not yet run against
+a real n13-dominated stretch or turned into an `analyze_*.py` script —
+next session's job once a longer run exists to point it at.
+
 ### Angle 4: The craft/tool economy — the single strongest effect found this whole pass
 
 `analyze_craft_economy.py`. Never analyzed before this session despite
@@ -386,20 +418,23 @@ Most of the seven angles turned out to be servable by data we already
 had — the actual gap this pass exposed was less "we're not logging enough"
 and more "we have no tooling to exploit what we log." Concretely:
 
-### 1. Real, cheap logging gaps
-- **Agent `specialty` is never logged.** It's static per-agent (set once
-  at spawn) but every log entry only carries the *mutable* snapshot
-  (location/energy/hunger/inventory/tools/alive) — specialty has to be
-  externally reconstructed or guessed. Cheap fix: emit one "roster" record
-  per agent at tick 0 (id, tier, specialty, home society) instead of
-  repeating it nowhere. Would have let angle 3 test "does specialization
-  drive inequality" directly instead of skipping that sub-question.
-- **Crowd decision context is invisible.** The sidecar's own decision log
-  captures `num_candidates`/`chosen_action` for LLM-driven leads, but
-  mechanical crowd choices (the vast majority of all actions) never
-  record what alternatives existed at that tick, only what got chosen.
-  Any future "was this a good choice given the options" angle needs this
-  and doesn't have it today.
+### 1. Real, cheap logging gaps — both closed same-day, 2026-07-17
+- ~~**Agent `specialty` is never logged.**~~ Closed as a side effect of the
+  fix below: `specialty` now rides along on every `decision_debug` record.
+  Still not a dedicated tick-0 roster record (would be cheaper to query
+  than re-deriving it from repeated per-action snapshots), so that's a
+  real remaining nice-to-have, just no longer a hard blocker for a
+  specialization-vs-inequality angle.
+- ~~**Crowd decision context is invisible.**~~ Closed: `decide.rs` now
+  exposes `DecisionDebug` (`gather_score`, `best_move_score`/
+  `best_food_move_score` and their targets, `chosen_score`,
+  `candidate_count`, `location_occupancy`/`location_congestion`, `hunger`,
+  `specialty`, `emergency_eligible`) per crowd/lead decision, attached to
+  logged entries the same way `society` already is. Built specifically to
+  make the two open hypotheses at the end of angle 6 (congestion penalty
+  too weak vs. better nodes structurally invisible to a 1-hop lookahead)
+  directly queryable instead of guessed at. See the angle 6 follow-up
+  above for the full field list and live verification.
 
 ### 2. A real performance gap, not a data gap
 Every `analyze_*.py` script this pass re-parsed the same ~1GB/2-million-
@@ -427,10 +462,13 @@ half-day of manual orchestration into one command.
 Angle 6 surfaced something that isn't about analysis tooling at all: `n13`
 looks like a genuine mechanical congestion trap (agents keep choosing an
 11.5%-success node over four 97-100%-success alternatives a few hops
-away), most likely because `decide.rs`'s hungry-agent pathing routes to
-the *nearest* node with any food left, never factoring in how congested
-it already is. Worth a real look at `bfs_next_hop_to_food` before the next
-long run, not just another thing to measure.
+away). **Update, same day**: `bfs_next_hop_to_food` was made
+congestion-aware and live-verified as real but insufficient (87.6% vs.
+87.5%, no real change) — the actual driver is ordinary non-emergency
+1-hop scoring, not the long-range path this fix touched. The new
+`decision_debug` logging (above) exists specifically to make the next
+attempt at this evidence-driven instead of another guess. Still the
+highest-priority open item in this whole project.
 
 ## My take
 

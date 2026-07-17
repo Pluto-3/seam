@@ -194,9 +194,21 @@ fn main() {
 
     let trade_enabled = !a.no_trade;
     for t in 1..=a.ticks {
-        let entries = run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled, &HashMap::new(), memory_enabled);
+        let (entries, decision_debug) =
+            run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled, &HashMap::new(), memory_enabled);
+        // Enrichment, not a TickLogEntry field: decision_debug only exists for
+        // agents whose tick actually went through choose_action_with_debug
+        // (not DEATH entries, not LLM-overridden lead ticks), so it's attached
+        // per-entry here rather than forced into the struct everyone gets.
         for e in &entries {
-            log_writer.write(e);
+            match decision_debug.get(&e.agent_id) {
+                Some(d) => {
+                    let mut v = serde_json::to_value(e).expect("log entry must serialize");
+                    v["decision_debug"] = serde_json::to_value(d).expect("decision debug must serialize");
+                    log_writer.write(&v);
+                }
+                None => log_writer.write(e),
+            }
         }
         stats.consume(&entries);
         if t % a.stats_every == 0 || t == a.ticks {

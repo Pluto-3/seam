@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::actions as act;
 use crate::agents::AgentState;
 use crate::constants as C;
-use crate::decide::{choose_action, Intent};
+use crate::decide::{choose_action_with_debug, DecisionDebug, Intent};
 use crate::log::{diff, TickLogEntry};
 use crate::world::World;
 
@@ -46,7 +46,7 @@ pub fn run_tick(
     trade_enabled: bool,
     external_intents: &HashMap<String, Intent>,
     memory_enabled: bool,
-) -> Vec<TickLogEntry> {
+) -> (Vec<TickLogEntry>, HashMap<String, DecisionDebug>) {
     let mut entries: Vec<TickLogEntry> = Vec::new();
 
     // 1. housekeeping
@@ -86,6 +86,10 @@ pub fn run_tick(
     }
 
     let mut intents: HashMap<String, Intent> = HashMap::new();
+    // Populated only when choose_action_with_debug actually ran - an LLM-
+    // overridden lead's tick has no candidate scores to report, so it's
+    // simply absent from this map rather than faked.
+    let mut decision_debug: HashMap<String, DecisionDebug> = HashMap::new();
     for idx in 0..agents.len() {
         if !agents[idx].alive {
             continue;
@@ -98,7 +102,12 @@ pub fn run_tick(
         // autopilot as the crowd - mirrors v1's external_intents semantics.
         let intent = match external_intents.get(&agents[idx].id) {
             Some(ov) => ov.clone(),
-            None => choose_action(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled),
+            None => {
+                let (intent, debug) =
+                    choose_action_with_debug(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled);
+                decision_debug.insert(agents[idx].id.clone(), debug);
+                intent
+            }
         };
         intents.insert(agents[idx].id.clone(), intent);
     }
@@ -166,5 +175,5 @@ pub fn run_tick(
         }
     }
 
-    entries
+    (entries, decision_debug)
 }

@@ -568,7 +568,8 @@ async fn main() {
                     let trade_enabled = sim.trade_enabled;
                     let tick = sim.tick;
                     let due_intents = std::mem::take(&mut sim.pending_intents);
-                    let entries = run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
+                    let (entries, decision_debug) =
+                        run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
                     sim.stats.consume(&entries);
 
                     // Deaths and standing orders were previously invisible in the
@@ -665,6 +666,13 @@ async fn main() {
                         let enriched: Vec<serde_json::Value> = entries.iter().filter(|e| keep(e)).map(|e| {
                             let mut v = serde_json::to_value(e).expect("log entry must serialize");
                             v["society"] = serde_json::json!(society_of(sim, &e.agent_id).map(|s| s.id.clone()));
+                            // Same absent-when-not-applicable rule as main.rs's
+                            // batch run path - null for DEATH entries and
+                            // LLM-overridden lead ticks, present for everything
+                            // choose_action_with_debug actually scored.
+                            if let Some(d) = decision_debug.get(&e.agent_id) {
+                                v["decision_debug"] = serde_json::to_value(d).expect("decision debug must serialize");
+                            }
                             v
                         }).collect();
                         if let Some(writer) = sim.log_writer.as_mut() {
