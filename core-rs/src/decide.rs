@@ -96,9 +96,15 @@ fn order_multiplier(node: &Node, resource_type: ResourceType) -> f64 {
 /// the highest congestion_factor(node) * MOVE_LOOKAHEAD_DISCOUNT^hops, the
 /// same congestion-penalty shape and per-distance discount already used
 /// everywhere else in this file, not necessarily the nearest by hop count.
-/// None if already standing on a food node, or none is reachable at all.
+/// The node the agent is already standing on (if it's a food node) is
+/// scored by the same formula at hop 0 and competes on equal footing - None
+/// means staying put actually won, or nothing is reachable at all, not
+/// merely "you happen to already be on some food node." (See below: this
+/// used to short-circuit to None the instant the agent was on *any* food
+/// node, regardless of how congested or depleted it was - that was the
+/// real reason the first version of this fix measured no change at all.)
 ///
-/// Previously returned the *first* food node BFS encountered - nearest by
+/// Originally returned the *first* food node BFS encountered - nearest by
 /// hop count, with zero awareness of how congested it already was. That
 /// let a single node become a self-reinforcing trap: once agents started
 /// piling onto it, congestion crushed its effective gather success, but
@@ -108,11 +114,37 @@ fn order_multiplier(node: &Node, resource_type: ResourceType) -> f64 {
 /// 42-92% of all activity and 100% of all deaths across three runs, with an
 /// 11.5% gather success rate vs. 97-100% at four equally-typed alternatives
 /// a few hops away.
+///
+/// Follow-up (2026-07-18): that first fix (congestion-aware scoring among
+/// *reachable* food nodes) was real but incomplete - it never compared
+/// against the node the agent was already standing on, so it never fired
+/// for the traffic actually driving the hotspot. Fixed here by including
+/// "stay" as a scored candidate like everything else. Also confirmed via
+/// `decision_debug` (ANALYSIS.md angle 6, 2026-07-18 follow-up) that
+/// `best_food_move_score` was null 100% of the time at the hotspot node
+/// across ~2.4-3.0M decisions in three independent runs - it has exactly
+/// two neighbors and neither is a food node, so the *un-fixed* 1-hop
+/// lookahead used for ordinary (non-emergency) MOVE scoring elsewhere in
+/// this file structurally cannot see any food alternative from there at
+/// all. This function's multi-hop BFS is the only thing that can - which
+/// is also why the call site below no longer gates it behind a hunger
+/// threshold; see the call site for that half of the fix.
 fn bfs_next_hop_to_food(agent: &AgentState, world: &World, node_occupancy: &HashMap<String, i32>) -> Option<String> {
     let start = agent.location.clone();
     let start_node = &world.nodes[&start];
+
+    // Score staying put, if the current node is itself a food node, with the
+    // exact same congestion-discounted formula used for every reachable
+    // alternative below (dist=0, so no MOVE_LOOKAHEAD_DISCOUNT applied) -
+    // makes "should I leave" a real comparison instead of "am I on *any*
+    // food node," which was blind to that node's own congestion/quality.
+    // That blind spot is why the first version of this fix (b3b8f0e)
+    // measured zero real change (87.6% -> 87.5% n13 share): it early-
+    // returned None for every agent already standing at n13, so the BFS
+    // never even ran for the traffic actually driving n13's dominance.
+    let mut best: Option<(Option<String>, f64)> = None; // (first_hop; None = stay put, score)
     if start_node.resource_type == Some(ResourceType::Food) && start_node.quantity > 0.0 {
-        return None;
+        best = Some((None, congestion_factor(&start, agent, node_occupancy)));
     }
 
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -129,14 +161,12 @@ fn bfs_next_hop_to_food(agent: &AgentState, world: &World, node_occupancy: &Hash
         visited.insert(n);
     }
 
-    let mut best: Option<(String, f64)> = None; // (first_hop, score)
-
     while let Some((current, first_hop, dist)) = queue.pop_front() {
         let node = &world.nodes[&current];
         if node.resource_type == Some(ResourceType::Food) && node.quantity > 0.0 {
             let score = congestion_factor(&current, agent, node_occupancy) * C::MOVE_LOOKAHEAD_DISCOUNT.powf(dist as f64);
             if best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
-                best = Some((first_hop.clone(), score));
+                best = Some((Some(first_hop.clone()), score));
             }
         }
         for edge in world.neighbors(&current) {
@@ -148,7 +178,7 @@ fn bfs_next_hop_to_food(agent: &AgentState, world: &World, node_occupancy: &Hash
             queue.push_back((nxt, first_hop.clone(), dist + 1));
         }
     }
-    best.map(|(first_hop, _)| first_hop)
+    best.and_then(|(hop, _)| hop)
 }
 
 fn can_signal(agent: &AgentState, node: &Node, kind: &str, tick: i64) -> bool {
@@ -318,11 +348,22 @@ pub fn generate_candidates(
     }
 
     // Move: 1-hop lookahead, discounted by edge cost, nudged by signals at the
-    // neighbor and, when critically hungry with no food in hand, by a BFS path
-    // toward food that the 1-hop lookahead alone could never see.
-    let mut emergency_hop: Option<String> = None;
-    if agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD && agent.held(ResourceType::Food) < C::TRADE_MIN_HELD {
-        emergency_hop = bfs_next_hop_to_food(agent, world, node_occupancy);
+    // neighbor and, whenever not already holding enough food, by a BFS path
+    // toward the best reachable food node (including the agent's current
+    // node as a candidate) that the 1-hop lookahead alone could never see.
+    //
+    // This used to only run past a hunger>=60 "emergency" threshold, which
+    // meant it covered under 1% of a hotspot node's real traffic (confirmed
+    // via decision_debug, ANALYSIS.md angle 6) - the other 99%+ was ordinary
+    // hunger-driven foraging that this BFS never got a chance to inform at
+    // all. Dropping the threshold lets it run continuously; its influence
+    // still scales up smoothly with hunger via `hunger_pressure` below
+    // (quadratic in hunger/100), so a barely-hungry agent gets a negligible
+    // nudge and a starving one gets a strong pull - a curve, not a cliff at
+    // a fixed hunger value.
+    let mut food_bfs_hop: Option<String> = None;
+    if agent.held(ResourceType::Food) < C::TRADE_MIN_HELD {
+        food_bfs_hop = bfs_next_hop_to_food(agent, world, node_occupancy);
     }
 
     for edge in world.neighbors(&agent.location) {
@@ -331,7 +372,7 @@ pub fn generate_candidates(
         let local_best = best_local_score(agent, neighbor, node_occupancy);
         let bonus = signal_bonus(agent, neighbor);
         let mut score = local_best * C::MOVE_LOOKAHEAD_DISCOUNT.powf(edge.cost) + bonus;
-        if let Some(ref hop) = emergency_hop {
+        if let Some(ref hop) = food_bfs_hop {
             if *hop == neighbor_id {
                 score += C::EMERGENCY_FOOD_BONUS * hunger_pressure(agent);
             }
@@ -384,9 +425,12 @@ pub struct DecisionDebug {
     pub location_congestion: f64,
     pub hunger: f64,
     pub specialty: String,
-    /// Whether this tick's hunger/food-held state even qualifies for the
-    /// long-range emergency BFS bonus - lets "was congestion-aware routing
-    /// even in play this tick" be answered directly instead of inferred.
+    /// Whether this tick's food-held state means the long-range food BFS
+    /// (`bfs_next_hop_to_food`) even ran - lets "was multi-hop routing even
+    /// in play this tick" be answered directly instead of inferred. No
+    /// longer hunger-gated (2026-07-18 follow-up: the BFS itself scales its
+    /// influence continuously via hunger_pressure, so this field now tracks
+    /// only the food-held guard, not a fixed hunger threshold).
     pub emergency_eligible: bool,
 }
 
@@ -456,7 +500,7 @@ pub fn choose_action_with_debug(
         location_congestion: congestion_factor(&agent.location, agent, node_occupancy),
         hunger: agent.hunger,
         specialty: agent.specialty.as_str().to_string(),
-        emergency_eligible: agent.hunger >= C::HUNGER_EMERGENCY_THRESHOLD && agent.held(ResourceType::Food) < C::TRADE_MIN_HELD,
+        emergency_eligible: agent.held(ResourceType::Food) < C::TRADE_MIN_HELD,
     };
 
     (chosen_intent, debug)
@@ -510,11 +554,30 @@ mod tests {
     }
 
     #[test]
-    fn none_when_already_on_food() {
+    fn stays_on_an_uncongested_food_node_with_no_better_alternative() {
         let world = two_food_node_world();
         let mut agent = hungry_agent();
         agent.location = "near".to_string();
         let occupancy: HashMap<String, i32> = HashMap::new();
+        // "near" is uncongested (score 1.0) and "far" is 3 hops away from
+        // here (near -> start -> mid -> far, discount 0.85^3 = 0.614) - not
+        // worth leaving for, so staying correctly wins.
         assert_eq!(bfs_next_hop_to_food(&agent, &world, &occupancy), None);
+    }
+
+    #[test]
+    fn leaves_a_congested_food_node_for_a_better_reachable_one() {
+        let world = two_food_node_world();
+        let mut agent = hungry_agent();
+        agent.location = "near".to_string();
+        let mut occupancy: HashMap<String, i32> = HashMap::new();
+        // The actual 2026-07-18 fix: previously this returned None
+        // unconditionally just for being on *a* food node, never comparing
+        // against how congested it already was. Now heavy congestion at
+        // "near" (score 1/(1+20*0.3) = 0.143) should lose to the clear
+        // "far" node reachable via "start" (score 0.85^3 = 0.614), and the
+        // agent should route away from its own congested node.
+        occupancy.insert("near".to_string(), 20);
+        assert_eq!(bfs_next_hop_to_food(&agent, &world, &occupancy), Some("start".to_string()));
     }
 }

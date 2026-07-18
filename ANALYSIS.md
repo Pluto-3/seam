@@ -360,6 +360,52 @@ is additive, not a breaking change to the log format. Not yet run against
 a real n13-dominated stretch or turned into an `analyze_*.py` script —
 next session's job once a longer run exists to point it at.
 
+**Follow-up, 2026-07-18: the open question answered decisively — it's
+hypothesis (b), and hypothesis (a) was never actually testable.** Three
+fresh instances re-run at the original scale (seed 19, 15 nodes, 40
+agents; main/societies4 with sidecar, nosidecar without), analyzed at
+~150-160k ticks each via the new `analyze_decision_debug.py`. Before
+trusting the two staged hypotheses, checked for a blind spot the original
+diagnostic couldn't see: `generate_candidates` also scores TRADE, and
+TRADE candidates are generated pairwise for every co-located agent, so a
+crowded node mechanically produces far more trade opportunities than a
+quiet one regardless of food quality — a structurally different
+"trade-attraction trap" that `gather_score`/`best_food_move_score` alone
+can't rule out. Checked directly (no new instrumentation needed, every
+log entry already carries `action`): at n13 itself GATHER is 75-77% of
+activity and TRADE is 0-0.7%, actually *rarer* there than the graph
+average (2.6-22.1% elsewhere) — n13's share of all trades (3.9-12.0%) is
+far below its share of all activity (64.3-90.2%). **Rejected. Agents at
+n13 are too busy surviving to trade; this is a food/gather trap, not a
+trade magnet**, confirming the original framing rather than replacing it.
+
+With that checked, the headline reconfirmed on fresh data first, exactly
+as before: n13 is 64.3% (main) / 83.2% (societies4) / 90.2% (nosidecar) of
+all activity and 100% of deaths (24/24, 25/25, 26/26) in every run, and
+time-windowed across the full run length (10k-tick buckets) the dominance
+is sustained throughout, not easing as the population thinned from 46 to
+~20-25 — so the earlier population plateau isn't agents learning to avoid
+the node.
+
+**The actual answer**: `best_food_move_score` is null **100.0% of the
+time** at n13, in all three runs, across ~2.4-3.0M decisions each, every
+specialty, every congestion bucket, no exceptions. Pulled n13's live
+topology directly to confirm why rather than trust the log alone: **n13
+has exactly two neighbors, `n2` and `n8`, and both are wood-type nodes —
+zero food nodes within one hop, as a fact of the generated graph, not a
+scoring outcome.** This means hypothesis (a) (`CONGESTION_WEIGHT` too
+weak) was never actually a live question — there is no competing
+food-move candidate for `gather_score` to out-score, at any congestion
+level, so reweighting congestion cannot change this outcome. The 1-hop
+lookahead structurally cannot see past n13's two wood neighbors to the
+four better food nodes a few hops out.
+
+**Real mechanical follow-up, now well-targeted instead of guessed at**:
+extend food-seeking lookahead past 1 hop (2+ hops, at minimum for the
+ordinary non-emergency path — the existing emergency BFS already does
+long-range search but only fires at hunger≥60, covering under 1% of n13's
+traffic per the prior follow-up). Not yet implemented.
+
 ### Angle 4: The craft/tool economy — the single strongest effect found this whole pass
 
 `analyze_craft_economy.py`. Never analyzed before this session despite
