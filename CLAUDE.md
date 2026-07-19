@@ -2,19 +2,20 @@
 
 Simulated multi-agent economy. v1/v2/v3 all shipped — see `DESIGN.md`, `DESIGN-V2.md`, `DESIGN-V3.md` for build history, `ANALYSIS.md` for the live data-analysis pass, and this session's memory (`project_seam.md` in the Claude memory store) for full narrative context. This file exists so the next session's open work is visible immediately, without having to go hunting for it in memory or old commits.
 
-## Next steps when resuming (as of 2026-07-17)
+## Where things stand (as of 2026-07-19)
 
-**Nothing is running right now.** All `serve`/sidecar instances were killed at the end of the last session. You (the user) said you'd restart them personally once you're back — this file assumes that hasn't happened yet.
+**The n13 congestion-trap investigation that this file used to track is resolved.** Full account in `ANALYSIS.md`'s "Angle 6" section. Short version:
 
-The open investigation, in order:
+- `best_food_move_score` was null 100% of the time at n13 (confirmed across ~2.4-3.0M decisions in 3 runs) — n13's only two graph neighbors are both wood nodes, zero food within 1 hop, a fact of the graph not a scoring bug.
+- The real bug: `bfs_next_hop_to_food` (`core-rs/src/decide.rs`) returned `None` unconditionally for any agent standing on *any* food node, so it never even ran for agents already at n13 — the traffic actually driving the finding. Fixed to score "stay put" as a real candidate, and dropped the old hunger≥60 gate so it runs continuously (commit `35e8218`).
+- Verified, not assumed: re-ran all three instances on the fixed binary, deaths dropped to near-zero (was 100% at n13 before), n13's activity share roughly halved (64-90% → 50-53%, stable across 160k ticks). **Not fully solved** — n13 is still the single most-active node by a wide margin, just less of a trap than before (commit `58a7aef`).
+- Bonus finding, cheap to get (from `stats.csv`, not the raw logs): the sidecar-vs-no-sidecar trade-count gap seen earlier this session vanished post-fix — main and nosidecar now track within 1% of each other for the whole run. Flagged as a likely correction to last session's "memory dampens trade" finding (probably confounded by the congestion trap, not a real LLM effect) — **not yet re-verified with a dedicated experiment**.
 
-1. **Restart the simulation run(s)** — whatever config you want (previous session used `main`/`societies4`/`nosidecar` variants on ports 7878/7880/7881). Use `--log-path --full-log --stats-csv --society-stats-csv` every time — a past session lost 11 hours of data by forgetting `--log-path`.
-2. **Let it run long enough for the congestion trap to actually develop.** A quick 200-tick test only showed node `n13` at 19.2% of activity; the real finding (42–92% of all activity, 100% of deaths) only showed up over 90,000-tick / multi-hour runs. Don't try to answer the open question below from a short run.
-3. **Pull the new `decision_debug` field from the log, specifically for ticks where agents are at `n13`.** This field was added and verified working (mechanism confirmed, not yet used for real analysis) in commit `b8000ad`. Check:
-   - Does `gather_score` beat `best_food_move_score` even when `location_congestion` is high? → if yes, `CONGESTION_WEIGHT` (currently 0.3, in `constants.rs`) is too weak relative to hunger-scaled food value.
-   - Is `best_food_move_score` usually `null` at `n13`? → if yes, no food node is even 1 hop away, meaning the normal decision-making literally cannot see the better alternatives a few hops out — the fix would need to extend lookahead depth, not just reweight congestion.
-   - There's no `analyze_*.py` script for this yet — writing one (reading `decision_debug` from the JSONL, filtering to `n13` or wherever the hotspot lands this run) is the next real piece of tooling needed, following the pattern of the existing `analyze_node_hotspots.py` etc.
-4. **Full context**: `ANALYSIS.md`'s "Angle 6" section has the whole story — the original hotspot finding, the emergency-routing fix that was tried and honestly verified as *not* fixing it (87.6% → 87.5%, no real change), and the reasoning behind what `decision_debug` was built to test.
-5. **Housekeeping**: disk was last checked at 62GB free, not rechecked this session — worth a quick check early, given ~18MB/hour per full-logged run.
+**Nothing is running right now.** All three instances (main:7878, societies4:7880, nosidecar:7881) plus both sidecars were stopped 2026-07-19 after a real disk-space near-miss (grew to 4.8GB free / 99% used overnight — the three full-logged runs were eating ~2GB/hour combined and nobody was watching). Raw JSONL from that run (42GB) and the archived pre-fix baseline (14GB) were deleted after their findings were extracted into `ANALYSIS.md` — the small `stats.csv`/`society-stats.csv`/sidecar files were kept and still exist in `core-rs/logs/`. Disk is back to ~60GB free.
 
-Everything through commit `b8000ad` is pushed to `origin/main`. No uncommitted work, no open plan file relevant beyond what's described above.
+## Next steps when resuming
+
+1. **If restarting long runs again, don't repeat the disk near-miss.** These full-logged 3-society/40-agent runs eat roughly 350-450MB/hour per instance (measured directly this session, not the earlier ~18MB/hour estimate which was wrong) — three concurrent instances will fill even a large disk in well under a day. Either check in more often, or don't leave `--full-log` running unattended for 12+ hours without a plan to archive/delete.
+2. **The trade-gap correction is a real open thread**: if it matters, a dedicated memory-on/off experiment on the *fixed* engine (mirroring last session's Phase 2 methodology) would confirm whether "memory dampens trade" was ever a real effect or entirely a congestion-trap artifact.
+3. **n13 is reduced, not eliminated** — the natural next mechanical step (not started) is extending food-seeking lookahead past 1 hop for the ordinary (non-emergency) path, per `ANALYSIS.md` angle 6's last paragraph, if pushing past ~50% n13 share matters.
+4. Everything through commit `58a7aef` is pushed to `origin/main` — check `git log` / `git push` status before assuming, this note doesn't self-update.
