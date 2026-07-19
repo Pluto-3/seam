@@ -406,6 +406,67 @@ ordinary non-emergency path — the existing emergency BFS already does
 long-range search but only fires at hunger≥60, covering under 1% of n13's
 traffic per the prior follow-up). Not yet implemented.
 
+**Follow-up, 2026-07-18 (same day): implemented, and this time it
+actually worked — verified, not assumed.** Rereading `bfs_next_hop_to_food`
+to design the fix found the real reason the *previous* fix (b3b8f0e)
+measured zero change: it returned `None` unconditionally for any agent
+standing on *any* food node, regardless of that node's own congestion or
+quality — it never even ran for agents already at n13, the traffic
+actually driving the finding. Fixed by scoring "stay put" as a real
+candidate in the same congestion-discounted comparison already used for
+every reachable alternative, and dropped the hunger≥60 gate entirely (it
+now runs whenever food isn't already held, with influence still scaling
+continuously via `hunger_pressure` rather than snapping on at a
+threshold). Two new unit tests pin the actual behavior change (leaving a
+congested food node for a better reachable one); all 5 tests pass.
+
+Killed and restarted all three instances on the fixed binary, same
+seed/scale, ran ~160k ticks, re-ran `analyze_decision_debug.py`.
+**Real, substantial improvement, honestly checked against the same
+metrics as before**: deaths collapsed to near-zero (main: 0/0, nosidecar:
+0/0, societies4: 6 total and *none* at n13 — pre-fix was 24-26 deaths per
+run, 100% at n13 in every case). n13's share of all activity roughly
+halved: 64.3%→50.3% (main), 83.2%→52.8% (societies4), 90.2%→50.0%
+(nosidecar), stable at that new level for the entire 160k-tick window,
+not just an early transient. **Not oversold**: n13 is still the single
+most-active node by a wide margin (50% vs. an even ~6.7% across 15
+nodes) — this reduced the trap, it didn't eliminate it. `decision_debug`'s
+`best_food_move_score` is *still* null 100% of the time, exactly as
+expected and not a contradiction: that field only measures the old,
+untouched 1-hop lookahead; the fix works through the separate BFS path,
+which isn't its own field in the diagnostic, so the outcome metrics
+(death count, activity share) are the real evidence here, not that
+particular field.
+
+**A second, unplanned finding, found for free from the tiny `stats.csv`
+files rather than the multi-GB JSONL** — before deleting the raw
+post-fix logs (56GB combined, and a real disk-space crisis had developed
+by the next morning: 4.8GB free, largely from these very logs, all three
+instances stopped as a result before this check happened): pulled the
+`trades_cum` trajectory from each run's stats CSV instead of re-scanning
+event logs. **The pre-fix sidecar-vs-no-sidecar trade gap (main 128k vs.
+nosidecar 3.7k trades at matched tick counts, flagged as unexplained
+earlier this session) is gone post-fix** — main and nosidecar track
+within 1% of each other for the *entire* run (e.g. tick 350k: 1,028,449
+vs. 1,028,922), not just at one snapshot. This strongly suggests that
+gap, and by extension **last session's Phase 2 "memory dampens the
+post-hunger-scare trade increase" finding, were confounded by the
+congestion trap itself** rather than a genuine LLM-behavioral effect —
+the no-sidecar run was so throttled by mass starvation/death that trade
+never got the chance to happen anywhere else. Not re-verified with a
+dedicated experiment (that would need isolating memory-on/off again,
+now on the fixed engine) — flagged here as a real correction candidate,
+not confirmed. `societies4` trails both (871k at tick 350k) but that's
+consistent with its known 4th leaderless society, not a sidecar effect.
+
+Raw JSONL from both the pre-fix baseline (14GB, archived) and these
+post-fix runs (42GB) deleted after this write-up — the per-event
+granularity they carried (n13 action-type breakdown, decision_debug
+hypothesis tests, the trade trajectory above) is fully captured here and
+in `stats.csv`/`society-stats.csv` (kept, tiny). Deleted under real disk
+pressure (4.8GB free), not roomy hindsight - if a finer-grained
+re-analysis is ever needed, it would require a fresh run.
+
 ### Angle 4: The craft/tool economy — the single strongest effect found this whole pass
 
 `analyze_craft_economy.py`. Never analyzed before this session despite
