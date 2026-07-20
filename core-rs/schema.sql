@@ -44,16 +44,28 @@ CREATE TABLE IF NOT EXISTS narrative_scenes (
 );
 CREATE INDEX IF NOT EXISTS narrative_run_idx ON narrative_scenes (run_id, tick);
 
-CREATE TABLE IF NOT EXISTS settlement_snapshots (
+-- Wave 5 (2026-07-20): renamed from settlement_snapshots - pre-dated the v3
+-- N-society model, when "node" alone was enough to identify the one
+-- settlement a run had. society_id and specialization_index added at the
+-- same time. On an existing pre-Wave-5 database, don't just re-run this -
+-- migrate in place instead (rename, add columns, backfill society_id from
+-- the existing node column - every legacy run had exactly one settlement
+-- per node, so that's an honest backfill; leave specialization_index NULL
+-- for legacy rows rather than faking a value nobody actually computed at
+-- the time). This CREATE TABLE is the shape for a genuinely fresh install
+-- only, where specialization_index can be NOT NULL from day one.
+CREATE TABLE IF NOT EXISTS society_snapshots (
     id BIGSERIAL PRIMARY KEY,
     run_id TEXT NOT NULL,
     tick BIGINT NOT NULL,
+    society_id TEXT NOT NULL,
     node TEXT NOT NULL,
     population_alive INTEGER NOT NULL,
     roster_size INTEGER NOT NULL,
     avg_energy DOUBLE PRECISION NOT NULL,
     avg_hunger DOUBLE PRECISION NOT NULL,
     total_food_held DOUBLE PRECISION NOT NULL,
+    specialization_index DOUBLE PRECISION NOT NULL,
     ts BIGINT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS settlement_run_idx ON settlement_snapshots (run_id, tick);
+CREATE INDEX IF NOT EXISTS society_run_idx ON society_snapshots (run_id, tick);

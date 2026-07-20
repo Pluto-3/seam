@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -307,13 +307,15 @@ struct PgLeadMemRow {
     hunger_scares_witnessed: i32,
 }
 
-struct PgSettlementRow {
+struct PgSocietyRow {
+    society_id: String,
     node: String,
     population_alive: i32,
     roster_size: i32,
     avg_energy: f64,
     avg_hunger: f64,
     total_food_held: f64,
+    specialization_index: f64,
 }
 
 /// Writes to Postgres happen here, after the sim lock is already released -
@@ -326,7 +328,7 @@ async fn persist_tick(
     tick: i64,
     events: Vec<PgEventRow>,
     lead_memory: Vec<PgLeadMemRow>,
-    settlements: Vec<PgSettlementRow>,
+    settlements: Vec<PgSocietyRow>,
 ) {
     for e in events {
         let _ = pg.execute(
@@ -346,15 +348,15 @@ async fn persist_tick(
         ).await;
     }
 
-    // v3 Phase 0: one row per society instead of one total - the schema's
-    // `node` column already differs per society so rows stay distinguishable
-    // without a schema change; a dedicated society-id column is left to
-    // whichever later phase actually needs to query per-society history.
+    // v3 Phase 0: one row per society. Wave 5 (2026-07-20) added an explicit
+    // society_id column (previously only the differing `node` value made
+    // rows distinguishable) and specialization_index, so replay can actually
+    // query per-society history and show a real specialization trend.
     for s in settlements {
         let _ = pg.execute(
-            "INSERT INTO settlement_snapshots (run_id, tick, node, population_alive, roster_size, avg_energy, avg_hunger, total_food_held, ts)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-            &[&run_id, &tick, &s.node, &s.population_alive, &s.roster_size, &s.avg_energy, &s.avg_hunger, &s.total_food_held, &ts],
+            "INSERT INTO society_snapshots (run_id, tick, society_id, node, population_alive, roster_size, avg_energy, avg_hunger, total_food_held, specialization_index, ts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[&run_id, &tick, &s.society_id, &s.node, &s.population_alive, &s.roster_size, &s.avg_energy, &s.avg_hunger, &s.total_food_held, &s.specialization_index, &ts],
         ).await;
     }
 }
@@ -617,7 +619,7 @@ async fn main() {
             loop {
                 let mut pg_events: Vec<PgEventRow> = Vec::new();
                 let mut pg_lead_memory: Vec<PgLeadMemRow> = Vec::new();
-                let mut pg_settlements: Vec<PgSettlementRow> = Vec::new();
+                let mut pg_societies: Vec<PgSocietyRow> = Vec::new();
 
                 let snap = {
                     let mut guard = state.sim.lock().unwrap();
@@ -776,13 +778,15 @@ async fn main() {
                             }
                             for society in &sim.societies {
                                 let sv = build_society_view(sim, society);
-                                pg_settlements.push(PgSettlementRow {
+                                pg_societies.push(PgSocietyRow {
+                                    society_id: sv["id"].as_str().unwrap_or("").to_string(),
                                     node: sv["node"].as_str().unwrap_or("").to_string(),
                                     population_alive: sv["population_alive"].as_i64().unwrap_or(0) as i32,
                                     roster_size: sv["roster_size"].as_i64().unwrap_or(0) as i32,
                                     avg_energy: sv["avg_energy"].as_f64().unwrap_or(0.0),
                                     avg_hunger: sv["avg_hunger"].as_f64().unwrap_or(0.0),
                                     total_food_held: sv["total_food_held"].as_f64().unwrap_or(0.0),
+                                    specialization_index: sv["specialization_index"].as_f64().unwrap_or(0.0),
                                 });
                             }
                         }
@@ -812,7 +816,7 @@ async fn main() {
                 let _ = state.tx.send(snap.clone());
 
                 if let Some(pg) = &state.pg {
-                    persist_tick(pg, &state.run_id, snap.tick, pg_events, pg_lead_memory, pg_settlements).await;
+                    persist_tick(pg, &state.run_id, snap.tick, pg_events, pg_lead_memory, pg_societies).await;
                 }
 
                 tokio::time::sleep(Duration::from_millis(tick_ms)).await;
@@ -836,6 +840,8 @@ async fn main() {
         .route("/player/action", post(post_player_action))
         .route("/player/possess/:society_id", post(post_player_possess))
         .route("/narrative", get(get_narrative).post(post_narrative))
+        .route("/replay/runs", get(get_replay_runs))
+        .route("/replay/snapshot", get(get_replay_snapshot))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", a.port);
@@ -1140,6 +1146,157 @@ async fn post_narrative(State(state): State<Arc<AppState>>, Json(update): Json<N
     }
 
     StatusCode::OK
+}
+
+// Wave 5: historical replay, reading the same Postgres connection the tick
+// loop already writes through (persist_tick, above) - additive, read-only,
+// no change to the live tick loop or the write path. Deliberately not a
+// pixel-perfect reconstruction of the live view: node_occupancy,
+// active_signals, and top_relationships are live-only derived state, never
+// persisted, and re-deriving them at an arbitrary historical tick would mean
+// replaying every event from scratch on every query. This surfaces what's
+// honestly reconstructable from what's actually stored - population/health/
+// specialization trends, narrative up to a tick, lead memory at that point,
+// and nearby raw events (lead-tier + deaths only, matching what persist_tick
+// actually writes by default - see the `keep` filter above).
+
+/// One row per distinct run_id that has ever logged events, with its tick
+/// range - lets the viewer offer a real pick-list instead of a blind
+/// typed-in run_id. Empty list (not an error) if this instance has no
+/// Postgres connection at all.
+async fn get_replay_runs(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
+    let Some(pg) = &state.pg else {
+        return Json(Vec::new());
+    };
+    let rows = pg
+        .query("SELECT run_id, MIN(tick) AS min_tick, MAX(tick) AS max_tick FROM events GROUP BY run_id ORDER BY run_id", &[])
+        .await
+        .unwrap_or_default();
+    let out = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "run_id": r.get::<_, String>("run_id"),
+                "min_tick": r.get::<_, i64>("min_tick"),
+                "max_tick": r.get::<_, i64>("max_tick"),
+            })
+        })
+        .collect();
+    Json(out)
+}
+
+#[derive(Deserialize)]
+struct ReplayQuery {
+    run_id: String,
+    tick: i64,
+}
+
+/// The nearest-at-or-before row per society/lead, narrative up to this
+/// tick, and a bounded window of raw events around it - one assembled JSON
+/// response, same spirit as build_snapshot but sourced from Postgres history
+/// instead of live SimState.
+async fn get_replay_snapshot(State(state): State<Arc<AppState>>, Query(q): Query<ReplayQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(pg) = &state.pg else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let society_rows = pg
+        .query(
+            "SELECT DISTINCT ON (society_id) society_id, node, population_alive, roster_size, avg_energy, avg_hunger, total_food_held, specialization_index, tick
+             FROM society_snapshots WHERE run_id = $1 AND tick <= $2 ORDER BY society_id, tick DESC",
+            &[&q.run_id, &q.tick],
+        )
+        .await
+        .unwrap_or_default();
+    let societies: Vec<serde_json::Value> = society_rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "society_id": r.get::<_, String>("society_id"),
+                "node": r.get::<_, String>("node"),
+                "population_alive": r.get::<_, i32>("population_alive"),
+                "roster_size": r.get::<_, i32>("roster_size"),
+                "avg_energy": r.get::<_, f64>("avg_energy"),
+                "avg_hunger": r.get::<_, f64>("avg_hunger"),
+                "total_food_held": r.get::<_, f64>("total_food_held"),
+                "specialization_index": r.get::<_, Option<f64>>("specialization_index"),
+                "as_of_tick": r.get::<_, i64>("tick"),
+            })
+        })
+        .collect();
+
+    let lead_rows = pg
+        .query(
+            "SELECT DISTINCT ON (lead_id) lead_id, memory_summary, caution_bias, trade_success_ratio, hunger_scares_witnessed, tick
+             FROM lead_memory_snapshots WHERE run_id = $1 AND tick <= $2 ORDER BY lead_id, tick DESC",
+            &[&q.run_id, &q.tick],
+        )
+        .await
+        .unwrap_or_default();
+    let leads: Vec<serde_json::Value> = lead_rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "lead_id": r.get::<_, String>("lead_id"),
+                "memory_summary": r.get::<_, String>("memory_summary"),
+                "caution_bias": r.get::<_, f64>("caution_bias"),
+                "trade_success_ratio": r.get::<_, Option<f64>>("trade_success_ratio"),
+                "hunger_scares_witnessed": r.get::<_, i32>("hunger_scares_witnessed"),
+                "as_of_tick": r.get::<_, i64>("tick"),
+            })
+        })
+        .collect();
+
+    let narrative_rows = pg
+        .query(
+            "SELECT tick, text FROM narrative_scenes WHERE run_id = $1 AND tick <= $2 ORDER BY tick DESC LIMIT 10",
+            &[&q.run_id, &q.tick],
+        )
+        .await
+        .unwrap_or_default();
+    let narrative: Vec<serde_json::Value> =
+        narrative_rows.iter().map(|r| serde_json::json!({ "tick": r.get::<_, i64>("tick"), "text": r.get::<_, String>("text") })).collect();
+
+    // Ordered by proximity to the requested tick, not just DESC - a window
+    // can easily hold more real rows than the cap (confirmed: 211 real rows
+    // in a plain ±50 window on a disposable test run), and a plain
+    // "ORDER BY tick DESC LIMIT 50" would silently bias toward the window's
+    // upper edge instead of the tick actually being looked at. Caught by
+    // checking the real row count against a real window, not assumed.
+    const EVENT_WINDOW: i64 = 50;
+    let event_rows = pg
+        .query(
+            "SELECT tick, agent_id, tier, action, target, success FROM events
+             WHERE run_id = $1 AND tick BETWEEN $2 AND $3 ORDER BY ABS(tick - $4) ASC LIMIT 50",
+            &[&q.run_id, &(q.tick - EVENT_WINDOW), &(q.tick + EVENT_WINDOW), &q.tick],
+        )
+        .await
+        .unwrap_or_default();
+    let mut events: Vec<serde_json::Value> = event_rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "tick": r.get::<_, i64>("tick"),
+                "agent_id": r.get::<_, String>("agent_id"),
+                "tier": r.get::<_, String>("tier"),
+                "action": r.get::<_, String>("action"),
+                "target": r.get::<_, Option<String>>("target"),
+                "success": r.get::<_, bool>("success"),
+            })
+        })
+        .collect();
+    // Sorted for display after selecting by proximity above - "nearest 50"
+    // and "chronological order" are different concerns.
+    events.sort_by_key(|e| e["tick"].as_i64().unwrap_or(0));
+
+    Ok(Json(serde_json::json!({
+        "run_id": q.run_id,
+        "requested_tick": q.tick,
+        "societies": societies,
+        "leads": leads,
+        "narrative": narrative,
+        "events": events,
+    })))
 }
 
 #[derive(Deserialize)]

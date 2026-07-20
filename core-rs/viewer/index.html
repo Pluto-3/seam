@@ -26,6 +26,14 @@
     border: 1px solid var(--border); border-radius: 3px; padding: 0.45rem 0.85rem; cursor: pointer;
   }
   button:hover { background: #1d2530; border-color: #34506b; }
+  select {
+    font-family: var(--mono); font-size: 0.85rem; background: var(--panel-alt); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px; padding: 0.4rem 0.6rem;
+  }
+  .replay-subhead {
+    font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-faint); margin: 1.2rem 0 0.5rem; font-weight: 600;
+  }
   button:focus-visible { outline: 2px solid var(--data); outline-offset: 1px; }
 
   /* ---------- masthead ---------- */
@@ -246,6 +254,18 @@
     <h2>events</h2>
     <div class="panel events-feed" id="events"><div class="empty-note" style="font-style:normal;color:var(--text-faint)">none yet</div></div>
   </div>
+</div>
+
+<h2>replay</h2>
+<div class="panel">
+  <div class="controls" style="margin-top:0; flex-wrap:wrap; align-items:center;">
+    <label for="replayRunSelect" class="lead-meta">run</label>
+    <select id="replayRunSelect" onchange="onReplayRunChange()"></select>
+    <label for="replayTickSlider" class="lead-meta">tick <b id="replayTickLabel">–</b></label>
+    <input type="range" id="replayTickSlider" style="flex:1; min-width:150px;" oninput="document.getElementById('replayTickLabel').textContent = this.value" onchange="loadReplaySnapshot()">
+    <button onclick="loadReplaySnapshot()">load</button>
+  </div>
+  <div id="replayResult" style="margin-top:1rem;"><div class="empty-note">pick a run and a tick, independent of the live feed above</div></div>
 </div>
 
 <h2>raw feed</h2>
@@ -907,12 +927,93 @@
     setStatus(false);
   }
 
+  // ---------- Wave 5: historical replay (Postgres-backed, independent of the live WS feed) ----------
+  async function loadReplayRuns() {
+    const select = document.getElementById("replayRunSelect");
+    try {
+      const resp = await fetch("/replay/runs");
+      const runs = await resp.json();
+      if (!runs || runs.length === 0) {
+        select.innerHTML = '<option value="">(no Postgres-logged runs on this instance)</option>';
+        return;
+      }
+      select.innerHTML = runs.map((r) =>
+        `<option value="${escapeHtml(r.run_id)}" data-min="${r.min_tick}" data-max="${r.max_tick}">${escapeHtml(r.run_id)} (${r.min_tick}–${r.max_tick})</option>`
+      ).join("");
+      onReplayRunChange();
+    } catch (e) {
+      select.innerHTML = '<option value="">(could not reach service)</option>';
+    }
+  }
+
+  function onReplayRunChange() {
+    const select = document.getElementById("replayRunSelect");
+    const opt = select.options[select.selectedIndex];
+    const slider = document.getElementById("replayTickSlider");
+    if (!opt || !opt.dataset.max) { slider.min = 0; slider.max = 0; slider.value = 0; document.getElementById("replayTickLabel").textContent = "–"; return; }
+    slider.min = opt.dataset.min;
+    slider.max = opt.dataset.max;
+    slider.value = opt.dataset.max;
+    document.getElementById("replayTickLabel").textContent = slider.value;
+    loadReplaySnapshot();
+  }
+
+  function renderReplaySnapshot(snap) {
+    const societiesHtml = (snap.societies || []).map((s) => `
+      <div class="panel society-card">
+        <div class="society-id">${escapeHtml(s.society_id)}</div>
+        <div class="society-meta">at ${escapeHtml(s.node)} · pop ${s.population_alive}/${s.roster_size} (as of tick ${s.as_of_tick})</div>
+        <div class="society-meta">energy ${s.avg_energy.toFixed(1)} · hunger ${s.avg_hunger.toFixed(1)}</div>
+        <div class="society-meta">food ${s.total_food_held.toFixed(1)}${s.specialization_index != null ? ` · specialization ${s.specialization_index.toFixed(3)}` : ""}</div>
+      </div>`).join("") || '<div class="empty-note">no society data at or before this tick</div>';
+
+    const leadsHtml = (snap.leads || []).map((l) => `
+      <div class="panel lead-card">
+        <div class="lead-name">${escapeHtml(l.lead_id)}</div>
+        <div class="lead-meta">as of tick ${l.as_of_tick} · caution ${Math.round(((l.caution_bias || 0) / 0.9) * 100)}%</div>
+        ${l.memory_summary ? `<div class="lead-summary">"${escapeHtml(l.memory_summary)}"</div>` : ""}
+      </div>`).join("");
+
+    const narrativeHtml = (snap.narrative || []).length
+      ? snap.narrative.map((s) => `<div class="scene"><div class="scene-tick">tick ${s.tick}</div><div class="scene-body">${escapeHtml(s.text)}</div></div>`).join("")
+      : '<div class="empty-note">no narrative scenes by this tick</div>';
+
+    const eventsHtml = (snap.events || []).length
+      ? snap.events.map((e) => `<div class="event-row"><span class="event-tick">tick ${e.tick}</span><span>${escapeHtml(e.agent_id)}: ${escapeHtml(e.action)}${e.success ? "" : " (failed)"}</span></div>`).join("")
+      : '<div class="empty-note" style="font-style:normal;color:var(--text-faint)">no nearby events</div>';
+
+    document.getElementById("replayResult").innerHTML = `
+      <div class="societies">${societiesHtml}</div>
+      <div class="leads" style="margin-top:0.75rem;">${leadsHtml}</div>
+      <div class="replay-subhead">narrative up to tick ${snap.requested_tick}</div>
+      <div class="narrative-panel">${narrativeHtml}</div>
+      <div class="replay-subhead">nearby events</div>
+      <div class="events-feed">${eventsHtml}</div>
+    `;
+  }
+
+  async function loadReplaySnapshot() {
+    const runId = document.getElementById("replayRunSelect").value;
+    const tick = document.getElementById("replayTickSlider").value;
+    const container = document.getElementById("replayResult");
+    if (!runId) { container.innerHTML = '<div class="empty-note">pick a run</div>'; return; }
+    container.innerHTML = '<div class="empty-note">loading…</div>';
+    try {
+      const resp = await fetch(`/replay/snapshot?run_id=${encodeURIComponent(runId)}&tick=${encodeURIComponent(tick)}`);
+      if (!resp.ok) { container.innerHTML = `<div class="empty-note">failed: HTTP ${resp.status}</div>`; return; }
+      renderReplaySnapshot(await resp.json());
+    } catch (e) {
+      container.innerHTML = '<div class="empty-note">could not reach service</div>';
+    }
+  }
+
   document.getElementById("connectBtn").onclick = connect;
   document.getElementById("disconnectBtn").onclick = disconnect;
   connect();
   fetchWorld();
   refreshHatchActions();
   refreshCrowd();
+  loadReplayRuns();
   setInterval(refreshHatchActions, 3000);
   setInterval(refreshCrowd, 10000);
 </script>
