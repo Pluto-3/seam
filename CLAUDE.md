@@ -14,6 +14,17 @@ Simulated multi-agent economy. v1/v2/v3 all shipped — see `DESIGN.md`, `DESIGN
 
 **Not yet done, flagged honestly rather than silently dropped**: the crowd-wide feedback aggregate ("how many distinct agents follow lead0's orders") that Phase 5's plan named as a possible next step — the per-agent data it needs now exists, but computing the aggregate itself wasn't done this session. Also open: cross-checking Phase 5's new relationship data against *why* seed 15 specifically collapsed in the asymmetry campaign (not done — both pieces just didn't exist together until today).
 
+## Proposed next moves (2026-07-20, none started, none chosen yet)
+
+Six real options surfaced after walking back through this session's build. Listed for the next session to pick up, not in priority order — nothing here has been decided:
+
+1. **Finish the feedback-loop aggregate** — a lead currently has no way to see "how many *distinct* agents are actually listening to me vs. ignoring me," only individual `orders_followed` counts per relationship. Short follow-up on data that already exists (see the "not yet done" note above).
+2. **Investigate why seed 15 specifically collapsed** in the asymmetric-power campaign (`LOG.md`, `core-rs/logs/asymmetric_power_campaign_2026-07-20.csv`) — collapsed sharply between order_strength 2.0 and 2.5, the only one of 15 seeds to do so. Graph topology hasn't been inspected; may be a structural bottleneck (n13-shaped) made worse by strong leader dominance.
+3. **Cross-reference Phase 5 relationship data against the campaign's trade decline** — find out *whose* specific relationships eroded as `order_strength` increased (certain roles? certain pairings?). Flagged as not done in the Workstream C entry.
+4. **Wire relationships into narrative/highlights** — they currently only feed a lead's private `memory_summary`; scenes and viewer highlights don't reference them yet. This is the direct path from "data exists" to the actual "watchable drama" payoff.
+5. **Move `seam-swarm` from notes to a real build** — the multi-echelon command depth + propose-validate-execute pattern documented in that repo's `PIVOT-NOTES.md` were waiting on seam's own architecture maturing (real memory, a feedback channel) — that's now true.
+6. **Real rivalry/conflict mechanics** — relationships currently only record trade and contention, not actual antagonism. A genuine adversarial mechanic would connect both the Watchable World ambition and `seam-swarm`'s own open questions about opposing sides.
+
 ## Where things stood as of 2026-07-19 (n13 investigation — resolved, kept for history)
 
 **The n13 congestion-trap investigation that this file used to track is resolved.** Full account in `ANALYSIS.md`'s "Angle 6" section. Short version:
