@@ -2,7 +2,19 @@
 
 Simulated multi-agent economy. v1/v2/v3 all shipped — see `DESIGN.md`, `DESIGN-V2.md`, `DESIGN-V3.md` for build history, `ANALYSIS.md` for the live data-analysis pass, and this session's memory (`project_seam.md` in the Claude memory store) for full narrative context. This file exists so the next session's open work is visible immediately, without having to go hunting for it in memory or old commits.
 
-## Where things stand (as of 2026-07-19)
+## Where things stand (as of 2026-07-20)
+
+**Both decisions from this session's external research pass are now built and verified — see `DESIGN-V3.md`'s "Phase 5" and "Research thread" sections, and `LOG.md`'s 2026-07-20 entries for the full account.**
+
+1. **Workstream A (fixed first, was blocking accurate narrative work)**: `sidecar.py`'s narrative generation had been silently dead since v3 Phase 0 (`get_settlement()` hit a route Phase 0 removed). Fixed, verified live against real Ollama output.
+2. **Workstream B — asymmetric-power campaign, run and resolved**: a real `--order-strength` tunable replaced the fixed `ORDER_GATHER_MULTIPLIER` constant; 75 runs (5 levels x 15 seeds) found trade activity declines ~21.5% from symmetric to strong asymmetry (SOVSIM-consistent), but population/survival mostly doesn't degrade (14/15 seeds: zero deaths at any level) except one seed with a sharp collapse specifically between levels 2.0-2.5. Mixed, honest result — not a clean replication either way.
+3. **Workstream C — Phase 5 relationships, built and verified**: every agent now tracks real trade/contention/order-following history with specific other agents (mechanical, all tiers); a lead's LLM memory verified live referencing its actual top relationship by id.
+
+`seam-swarm`'s own slice of the same research pass (multi-echelon command depth, the propose-validate-execute pattern) is documented in that repo's `PIVOT-NOTES.md` — still unbuilt, exploration only, untouched this session.
+
+**Not yet done, flagged honestly rather than silently dropped**: the crowd-wide feedback aggregate ("how many distinct agents follow lead0's orders") that Phase 5's plan named as a possible next step — the per-agent data it needs now exists, but computing the aggregate itself wasn't done this session. Also open: cross-checking Phase 5's new relationship data against *why* seed 15 specifically collapsed in the asymmetry campaign (not done — both pieces just didn't exist together until today).
+
+## Where things stood as of 2026-07-19 (n13 investigation — resolved, kept for history)
 
 **The n13 congestion-trap investigation that this file used to track is resolved.** Full account in `ANALYSIS.md`'s "Angle 6" section. Short version:
 
