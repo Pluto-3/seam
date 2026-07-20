@@ -331,3 +331,11 @@ With seam sitting at a stable point (v3 built, the n13 congestion bug fixed and 
 
 `seam-swarm`'s own slice of this same research pass (CommandSwarm's propose-validate-execute pattern, a multi-echelon command-depth direction) is documented separately in that repo's own `PIVOT-NOTES.md` - swarm stays unbuilt for now, this was a documentation pass to avoid losing the thinking, not a resumption of that pivot.
 
+## 2026-07-20 — Workstream A: narrative generation was silently dead since v3 Phase 0, fixed and verified live
+
+A codebase exploration pass ahead of Phase 5 turned up a real, previously-uncaught regression: `sidecar.py`'s `write_narrative_scene` called `client.get_settlement()`, which hit `/settlement` - a route Phase 0 (2026-07-16) removed in favor of `/societies` when the single-settlement mechanic generalized to N societies. `get_settlement()` had been returning `None` on every call since, so `write_narrative_scene` bailed out silently every single cycle - narrative generation has produced nothing for four days without anyone noticing, since nothing about it errors loudly.
+
+**Fixed properly, not patched around**: `ServiceClient.get_settlement()` replaced with `get_societies()` (`/societies`, returns the list `build_society_view` already produces per society - same field names the old single-settlement dict used, just N of them instead of one). `build_narrative_prompt` and `_narrative_signature` changed from taking one `settlement: dict` to `societies: list[dict]`, looping to describe every society instead of assuming exactly one exists.
+
+**Verified live, not just compiled clean**: ran a real two-society `serve` instance plus `sidecar.py` against actual Ollama (`llama3.2:3b`), narrative interval shortened to 5s for the test. `GET /narrative` came back with three real, tick-tagged scenes correctly describing both societies by id with their actual population/hunger/food numbers, and referencing leads by their real assigned names and one lead's real `memory_summary` quote - not a crash, not an empty list, not fabricated content. Test `serve`/sidecar processes killed after confirming, nothing left running.
+

@@ -120,8 +120,8 @@ class ServiceClient:
     def post_identities(self, updates: list[dict]) -> bool:
         return self._post("/agents/identities", updates)
 
-    def get_settlement(self) -> Optional[dict]:
-        return self._get("/settlement")
+    def get_societies(self) -> list[dict]:
+        return self._get("/societies") or []
 
     def get_narrative(self) -> list[dict]:
         return self._get("/narrative") or []
@@ -199,7 +199,7 @@ def summarize_for_lead(client: ServiceClient, lead_id: str, model: str, log: Dec
                hunger_scares_witnessed=lead.get("hunger_scares_witnessed"))
 
 
-def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: str) -> str:
+def build_narrative_prompt(leads: list[dict], societies: list[dict], previous_scene: str) -> str:
     lead_lines = []
     for l in leads:
         if not l["alive"]:
@@ -226,12 +226,16 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
             f"Energy {l['energy']:.0f}/100, hunger {l['hunger']:.0f}/100.{note}"
         )
 
-    settlement_line = (
-        f"The settlement at node {settlement['node']}: {settlement['population_alive']}/{settlement['roster_size']} "
-        f"people, average hunger {settlement['avg_hunger']:.0f}, {settlement['total_food_held']:.0f} food on hand."
-    )
+    # v3: one line per society instead of a single settlement - same fields
+    # `build_society_view` (serve_main.rs) already returns per society, this
+    # just loops instead of assuming there's exactly one.
+    society_lines = [
+        f"Society {s['id']} at node {s['node']}: {s['population_alive']}/{s['roster_size']} "
+        f"people, average hunger {s['avg_hunger']:.0f}, {s['total_food_held']:.0f} food on hand."
+        for s in societies
+    ]
 
-    context = "\n".join(["Leads:"] + lead_lines + ["", settlement_line])
+    context = "\n".join(["Leads:"] + lead_lines + [""] + society_lines)
     # Framed as background tone only, not something to respond to or compare
     # against - the garbled "not at that place; according to the previous
     # statement..." sentences found by reading 400+ real scenes came from
@@ -259,7 +263,7 @@ def build_narrative_prompt(leads: list[dict], settlement: dict, previous_scene: 
     )
 
 
-def _narrative_signature(leads: list[dict], settlement: dict) -> tuple:
+def _narrative_signature(leads: list[dict], societies: list[dict]) -> tuple:
     """A coarse fingerprint of 'is there anything new to say' - rounded so
     routine per-tick noise doesn't count as change, only asking Ollama to
     write something when the picture has actually shifted."""
@@ -267,19 +271,20 @@ def _narrative_signature(leads: list[dict], settlement: dict) -> tuple:
         (l["id"], l["alive"], l["location"], round(l["energy"] / 10), round(l["hunger"] / 10), l.get("memory_summary", ""))
         for l in leads
     )
-    settlement_sig = (
-        settlement["population_alive"], round(settlement["avg_hunger"] / 10), round(settlement["total_food_held"] / 20),
+    society_sig = tuple(
+        (s["id"], s["population_alive"], round(s["avg_hunger"] / 10), round(s["total_food_held"] / 20))
+        for s in societies
     )
-    return (lead_sig, settlement_sig)
+    return (lead_sig, society_sig)
 
 
 def write_narrative_scene(client: ServiceClient, model: str, log: DecisionLog, previous: dict) -> None:
     leads = client.get_leads()
-    settlement = client.get_settlement()
-    if not leads or settlement is None:
+    societies = client.get_societies()
+    if not leads or not societies:
         return
 
-    signature = _narrative_signature(leads, settlement)
+    signature = _narrative_signature(leads, societies)
     if signature == previous.get("signature"):
         # Nothing meaningfully different since the last scene - skip the
         # call entirely rather than pay for (and inflict) another
@@ -287,7 +292,7 @@ def write_narrative_scene(client: ServiceClient, model: str, log: DecisionLog, p
         log.record(kind="narrative", llm_answered=False, skipped_unchanged=True)
         return
 
-    response = query_ollama(build_narrative_prompt(leads, settlement, previous.get("text", "")), model=model)
+    response = query_ollama(build_narrative_prompt(leads, societies, previous.get("text", "")), model=model)
     if not response:
         log.record(kind="narrative", llm_answered=False)
         return
