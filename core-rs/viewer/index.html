@@ -199,6 +199,17 @@
   </div>
 </div>
 
+<h2>relationship network</h2>
+<div class="panel">
+  <svg id="networkSvg" viewBox="0 0 480 300" preserveAspectRatio="xMidYMid meet"></svg>
+  <div class="map-legend">
+    <span><span class="map-dot" style="background:#6ee7a8"></span>trade-dominant relationship</span>
+    <span><span class="map-dot" style="background:#c1685a"></span>contest-dominant relationship</span>
+    <span><span class="map-dot" style="background:#f4d35e"></span>order-following-dominant</span>
+    <span><span class="map-dot" style="background:#7c8695"></span>crowd partner (unlabeled)</span>
+  </div>
+</div>
+
 <div class="focused-grid">
   <div>
     <h2 id="settlementLabel">the settlement</h2>
@@ -260,10 +271,11 @@
     worldNodes: [],
     worldEdges: [],
     nodePositions: {}, // node id -> {x, y} in [-1, 1] space
+    userDisconnected: false, // true only when the user clicks "disconnect" - distinguishes that from a dropped connection, which should auto-retry
   };
 
-  function setStatus(connected) {
-    statusEl.textContent = connected ? "connected" : "disconnected";
+  function setStatus(connected, reconnecting) {
+    statusEl.textContent = connected ? "connected" : reconnecting ? "reconnecting…" : "disconnected";
     statusDot.className = "dot " + (connected ? "up" : "down");
   }
 
@@ -465,6 +477,90 @@
       parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#fff" stroke="#6ee7a8" stroke-width="1.5" />`);
     }
     svg.innerHTML = parts.join("");
+  }
+
+  // Wave 4: who's actually connected to whom, drawn as a graph - the direct
+  // payoff of Phase 5's relationship data existing at all. Plain circular
+  // layout on purpose, same judgment call already made for the world map -
+  // not force-directed; that's real added complexity not justified until a
+  // simple layout is tried and found lacking. Global/all-societies, not
+  // scoped to the focused one - relationships (and cross-society trades)
+  // already span societies, this is the first place that becomes visible
+  // as a picture instead of scrolling highlight text.
+  function relationshipDominantColor(rel) {
+    const weights = [
+      ["#6ee7a8", rel.trades],
+      ["#c1685a", rel.contested_node_count],
+      ["#f4d35e", rel.orders_followed],
+    ];
+    weights.sort((a, b) => b[1] - a[1]);
+    return weights[0][1] > 0 ? weights[0][0] : "#4d5563";
+  }
+
+  function relationshipWeight(rel) {
+    return rel.trades + rel.contested_node_count + rel.orders_followed;
+  }
+
+  function renderNetwork(snap) {
+    const svg = document.getElementById("networkSvg");
+    const named = [...(snap.leads || [])];
+    for (const s of snap.societies || []) {
+      if (s.hatch) named.push(s.hatch);
+    }
+    if (named.length === 0) { svg.innerHTML = ""; return; }
+
+    const w = 480, h = 300;
+    const cx = w / 2, cy = h / 2;
+    const namedRadius = Math.min(w, h) / 2 - 60;
+    const satelliteRadius = namedRadius + 35;
+    const nameIndex = buildAgentNameIndex(snap);
+
+    const positions = {};
+    named.forEach((a, i) => {
+      const angle = (2 * Math.PI * i) / named.length - Math.PI / 2;
+      positions[a.id] = { x: cx + namedRadius * Math.cos(angle), y: cy + namedRadius * Math.sin(angle), angle };
+    });
+
+    // Crowd partners (not on the named circle) get a small satellite
+    // position anchored near whichever named node first referenced them -
+    // preserves the real data (most observed relationships this session
+    // were named-to-crowd, not named-to-named) instead of silently
+    // dropping most of it.
+    const satellites = {};
+    const edgeParts = [];
+    for (const a of named) {
+      const pos = positions[a.id];
+      for (const rel of a.top_relationships || []) {
+        let other = positions[rel.other_id];
+        if (!other) {
+          if (!satellites[rel.other_id]) {
+            satellites[rel.other_id] = {
+              x: cx + satelliteRadius * Math.cos(pos.angle),
+              y: cy + satelliteRadius * Math.sin(pos.angle),
+            };
+          }
+          other = satellites[rel.other_id];
+        }
+        const color = relationshipDominantColor(rel);
+        const width = Math.min(1 + relationshipWeight(rel) / 5, 5).toFixed(1);
+        edgeParts.push(
+          `<line x1="${pos.x.toFixed(1)}" y1="${pos.y.toFixed(1)}" x2="${other.x.toFixed(1)}" y2="${other.y.toFixed(1)}" stroke="${color}" stroke-width="${width}" opacity="0.75" />`
+        );
+      }
+    }
+
+    const nodeParts = [];
+    for (const a of named) {
+      const pos = positions[a.id];
+      const label = escapeHtml(nameIndex[a.id] || a.id);
+      nodeParts.push(`<circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="7" fill="${a.tier === "player" ? "#fff" : "#8fd3ff"}" stroke="#232a35" stroke-width="1.5" />`);
+      nodeParts.push(`<text x="${pos.x.toFixed(1)}" y="${(pos.y - 11).toFixed(1)}" font-size="8" text-anchor="middle" fill="#d9dee6">${label}</text>`);
+    }
+    for (const [id, pos] of Object.entries(satellites)) {
+      nodeParts.push(`<circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="3" fill="#7c8695"><title>${escapeHtml(nameIndex[id] || id)}</title></circle>`);
+    }
+
+    svg.innerHTML = edgeParts.join("") + nodeParts.join("");
   }
 
   // ---------- panel renderers ----------
@@ -731,6 +827,7 @@
     renderEvents(snap.events);
     renderHighlights(snap.highlights);
     renderMap(snap);
+    renderNetwork(snap);
 
     const line = `tick ${snap.tick}: pop=${snap.population}/${snap.total} spec=${snap.specialization_index.toFixed(3)} trades=${snap.trades_cumulative}\n`;
     logEl.textContent = (line + logEl.textContent).split("\n").slice(0, 40).join("\n");
@@ -778,17 +875,34 @@
     setTimeout(refreshHatchActions, 400);
   }
 
+  const RECONNECT_DELAY_MS = 2000;
+
   function connect() {
     if (viewerState.ws) return;
+    viewerState.userDisconnected = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     viewerState.ws = new WebSocket(`${proto}//${location.host}/ws`);
     viewerState.ws.onopen = () => setStatus(true);
-    viewerState.ws.onclose = () => { setStatus(false); viewerState.ws = null; };
+    viewerState.ws.onclose = () => {
+      viewerState.ws = null;
+      // A dropped connection (phone locking, walking out of WiFi range, the
+      // tab backgrounding) is not the same as the user clicking disconnect -
+      // only the latter should actually stay disconnected. Plain fixed
+      // delay, no backoff - this is one LAN-local server, not a scenario
+      // that needs it.
+      if (viewerState.userDisconnected) {
+        setStatus(false);
+      } else {
+        setStatus(false, true);
+        setTimeout(connect, RECONNECT_DELAY_MS);
+      }
+    };
     viewerState.ws.onerror = () => { setStatus(false); };
     viewerState.ws.onmessage = (ev) => render(JSON.parse(ev.data));
   }
 
   function disconnect() {
+    viewerState.userDisconnected = true;
     if (viewerState.ws) { viewerState.ws.close(); viewerState.ws = null; }
     setStatus(false);
   }

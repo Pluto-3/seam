@@ -25,7 +25,10 @@ Six real options surfaced after walking back through this session's build. Liste
 5. **Move `seam-swarm` from notes to a real build** — the multi-echelon command depth + propose-validate-execute pattern documented in that repo's `PIVOT-NOTES.md` were waiting on seam's own architecture maturing (real memory, a feedback channel) — that's now true.
 6. **Real rivalry/conflict mechanics** — relationships currently only record trade and contention, not actual antagonism. A genuine adversarial mechanic would connect both the Watchable World ambition and `seam-swarm`'s own open questions about opposing sides.
 
-## Viewer: full audit done, Waves 1-3 + a smoke-test harness built (2026-07-20)
+## Viewer: full audit done, Waves 1-4 + a smoke-test harness built (2026-07-20)
+
+**Waves 1-3 recap below; Wave 4 (relationship network graph) + WS auto-reconnect shipped in a later round the same day, live to an actually-running world** (`serve`+`sidecar.py`, port 7878, phone access over WiFi - see `LOG.md`'s final 2026-07-20 entry). Both were viewer-only changes (no backend touch), developed and verified against an isolated scratch copy, then copied over the real `viewer/index.html` once verified - the live world was never restarted, kept ticking the whole time (confirmed correct against it directly afterward, tick 42566+). Auto-reconnect: a dropped WS connection (phone locking, leaving WiFi range) now retries automatically instead of going dark permanently, verified via a deterministic Node harness rather than live Chrome (see the methodology note below). The network graph: every lead/hatch on a plain circle, edges from `top_relationships` colored by dominant relationship type and weighted by interaction count, crowd partners shown as small satellite nodes rather than dropped - the first place relationships are visible as a picture instead of scrolling text.
+
 
 A full read-through of `core-rs/viewer/index.html` (previously untouched all session) found it had no path to any of this session's new backend work. Full 6-wave/11-item proposal discussed; the "stay vanilla, no React yet" call was explicitly revisited and reconfirmed (nothing in the proposal structurally needs a framework — the file's real weak point is scattered global state, not rendering complexity). Waves 1-3 plus a smoke-test harness built and verified (full account in `LOG.md`'s two 2026-07-20 viewer entries):
 
@@ -36,7 +39,7 @@ A full read-through of `core-rs/viewer/index.html` (previously untouched all ses
 
 **A real methodology limit surfaced along the way, worth remembering for any future viewer work**: headless-Chrome's `--virtual-time-budget` + `--dump-dom` is **not reliable** for verifying anything that depends on multiple WebSocket messages accumulating over time (confirmed the server itself pushes a fresh snapshot every ~200ms with no throttling, via a direct Python WS client — the unreliability is purely in how virtual time interacts with real network events in headless Chrome). Single-snapshot / structural checks are fine and were used throughout; multi-message accumulation logic (like the rate sparklines) needs a direct logic test instead (a Node `vm` context with stubbed `document`/`WebSocket`/`fetch`, calling `render()` with synthetic snapshots) — see `LOG.md` for the pattern.
 
-**Still open, not built this round** — Waves 4-6 from the original proposal: a relationship/trade network graph view; historical replay against the existing Postgres layer; WebSocket auto-reconnect, fixing the shared-single-possession problem, and an actual access boundary (all three worth doing before this is ever shown outside solo use).
+**Still open, not built this round** — Wave 5 (historical replay against the existing Postgres layer, its own dedicated exploration+plan pass) and the remaining two-thirds of Wave 6 (fixing the shared-single-possession problem, and an actual access boundary - both gated on actual multi-viewer/outside-sharing use, not a fixed schedule, per the reasoning already recorded above).
 
 ## Where things stood as of 2026-07-19 (n13 investigation — resolved, kept for history)
 
