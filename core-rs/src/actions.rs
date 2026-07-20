@@ -203,8 +203,21 @@ pub fn resolve_trade_phase(
         let agent_before = agent.snapshot();
         let partner_before = partner.snapshot();
         let success = trade_feasible(agent, Some(partner), &intent);
+
+        // Phase 5: each side's own valuation of the swap, computed from
+        // pre-trade holdings (marginal_value depends on current inventory,
+        // so this must happen before execute_swap mutates either agent) -
+        // this agent's gain is what it receives valued by its own
+        // marginal_value minus what it gives up, valued the same way.
+        let give = ResourceType::from_str(intent.give.as_ref().unwrap());
+        let want = ResourceType::from_str(intent.want.as_ref().unwrap());
+        let agent_gain = marginal_value(agent, want) * intent.want_amt - marginal_value(agent, give) * intent.give_amt;
+        let partner_gain = marginal_value(partner, give) * intent.give_amt - marginal_value(partner, want) * intent.want_amt;
+
         if success {
             execute_swap(agent, partner, &intent);
+            agent.record_relationship_trade(&partner.id, agent_gain, tick);
+            partner.record_relationship_trade(&agent.id, partner_gain, tick);
         }
         let agent_after = agent.snapshot();
         entries.push(entry(tick, agent, "TRADE", Some(target_id.clone()), success, agent_before, agent_after));

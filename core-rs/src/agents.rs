@@ -44,6 +44,24 @@ pub struct AgentState {
     pub caution_bias: f64,
     pub recent_trades: VecDeque<bool>, // true = resolved successfully; capped at MEMORY_WINDOW
     pub hunger_scares_witnessed: u32,
+
+    // Phase 5: memory-of-others. Mechanical counters only, all tiers (crowd
+    // included) - this is just data, no LLM cost, same reasoning that already
+    // justifies caution_bias's mechanical half. Sparse: only grows with real
+    // interactions, never a dense N-by-N structure. The LLM-authored
+    // *interpretation* of this data (referencing a specific relationship in
+    // memory_summary/narrative text) stays lead/hatch-only, since only those
+    // tiers get LLM cycles at all - see sidecar.py's build_memory_prompt.
+    pub relationships: HashMap<String, RelationshipRecord>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RelationshipRecord {
+    pub trades: u32,
+    pub trade_balance: f64,        // this agent's net gain/loss across all trades with this partner
+    pub contested_node_count: u32, // times both agents gathered at the same node the same tick
+    pub orders_followed: u32,      // times this agent's GATHER was boosted by *that* agent's standing order
+    pub last_interaction_tick: u64,
 }
 
 pub fn round3(v: f64) -> f64 {
@@ -70,6 +88,7 @@ impl AgentState {
             caution_bias: 0.0,
             recent_trades: VecDeque::new(),
             hunger_scares_witnessed: 0,
+            relationships: HashMap::new(),
         }
     }
 
@@ -96,6 +115,67 @@ impl AgentState {
         while self.recent_trades.len() > MEMORY_WINDOW {
             self.recent_trades.pop_front();
         }
+    }
+
+    /// Phase 5: this agent's side of a real, resolved trade with a specific
+    /// partner - `my_gain` is this agent's own net inventory value change
+    /// from the swap (positive = came out ahead). Only called on success;
+    /// a failed trade attempt has no partner-specific relationship to record
+    /// (it's not clear who, if anyone, "did" anything to this agent).
+    pub fn record_relationship_trade(&mut self, partner_id: &str, my_gain: f64, tick: i64) {
+        let rec = self.relationships.entry(partner_id.to_string()).or_default();
+        rec.trades += 1;
+        rec.trade_balance += my_gain;
+        rec.last_interaction_tick = tick.max(0) as u64;
+    }
+
+    /// Phase 5: this agent competed for the same gather target, the same
+    /// tick, as `other_id` - the mechanical signal the congestion penalty
+    /// (`decide.rs::congestion_factor`) already scores but never previously
+    /// attributed to specific agents.
+    pub fn record_contested_node(&mut self, other_id: &str, tick: i64) {
+        let rec = self.relationships.entry(other_id.to_string()).or_default();
+        rec.contested_node_count += 1;
+        rec.last_interaction_tick = tick.max(0) as u64;
+    }
+
+    /// Phase 5: this agent's GATHER just got the order_multiplier boost from
+    /// a standing order posted by `poster_id` (a lead or hatch) - the actual
+    /// feedback channel. Crowd agents already read a signal's *kind*
+    /// (`decide.rs::order_multiplier`) but never its `posted_by`; this is
+    /// the first place that identity gets used for anything.
+    pub fn record_order_followed(&mut self, poster_id: &str, tick: i64) {
+        let rec = self.relationships.entry(poster_id.to_string()).or_default();
+        rec.orders_followed += 1;
+        rec.last_interaction_tick = tick.max(0) as u64;
+    }
+
+    /// Mechanical-only digest of this agent's most significant relationships,
+    /// ranked by total interaction weight - no LLM involved, same "the number
+    /// is free, the prose costs an LLM call" split as caution_bias. Used for
+    /// both the viewer's public_view and the sidecar's relationship digest
+    /// that feeds a lead's memory prompt.
+    pub fn top_relationships(&self, n: usize) -> Vec<Value> {
+        let mut entries: Vec<(&String, &RelationshipRecord)> = self.relationships.iter().collect();
+        entries.sort_by(|a, b| {
+            let weight_a = a.1.trades + a.1.contested_node_count + a.1.orders_followed;
+            let weight_b = b.1.trades + b.1.contested_node_count + b.1.orders_followed;
+            weight_b.cmp(&weight_a).then_with(|| b.1.last_interaction_tick.cmp(&a.1.last_interaction_tick))
+        });
+        entries
+            .into_iter()
+            .take(n)
+            .map(|(other_id, rec)| {
+                json!({
+                    "other_id": other_id,
+                    "trades": rec.trades,
+                    "trade_balance": round3(rec.trade_balance),
+                    "contested_node_count": rec.contested_node_count,
+                    "orders_followed": rec.orders_followed,
+                    "last_interaction_tick": rec.last_interaction_tick,
+                })
+            })
+            .collect()
     }
 
     pub fn trade_success_ratio(&self) -> Option<f64> {
@@ -172,6 +252,7 @@ impl AgentState {
             "caution_bias": self.caution_bias,
             "trade_success_ratio": self.trade_success_ratio(),
             "hunger_scares_witnessed": self.hunger_scares_witnessed,
+            "top_relationships": self.top_relationships(3),
         })
     }
 }

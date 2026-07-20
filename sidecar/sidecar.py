@@ -146,14 +146,40 @@ def build_decision_prompt(lead: dict, candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _relationship_digest(lead: dict) -> str:
+    """Phase 5: turn the mechanical top_relationships counters (agents.rs's
+    top_relationships - free, no LLM cost) into one plain clause the memory
+    prompt can use. Purely descriptive of real counters; the LLM never
+    invents a relationship, it only gets to phrase one that already exists."""
+    rels = lead.get("top_relationships") or []
+    if not rels:
+        return ""
+    top = rels[0]
+    other = top["other_id"]
+    parts = []
+    if top["trades"] > 0:
+        sign = "gained from" if top["trade_balance"] >= 0 else "lost out in"
+        parts.append(f"traded with {other} {top['trades']} time(s) ({sign} it overall)")
+    if top["contested_node_count"] > 0:
+        parts.append(f"competed with {other} for the same resource {top['contested_node_count']} time(s)")
+    if top["orders_followed"] > 0:
+        parts.append(f"had {other} issue {top['orders_followed']} standing order(s) it acted on")
+    if not parts:
+        return ""
+    return f"Your most notable relationship right now: you've {'; '.join(parts)}."
+
+
 def build_memory_prompt(lead: dict) -> str:
     ratio = lead.get("trade_success_ratio")
     ratio_desc = "no recent trade attempts" if ratio is None else f"{ratio * 100:.0f}% of recent trade attempts succeeded"
+    relationship_line = _relationship_digest(lead)
     return (
         f"You are an agent in a simulated economy. Your goal: {lead['goal']}. "
         f"Your personality: {lead['personality']}.\n"
         f"Recently: {ratio_desc}. You've had {lead['hunger_scares_witnessed']} close calls with hunger this run.\n"
-        "Write ONE short first-person sentence reflecting on how things have been going for you. "
+        + (f"{relationship_line}\n" if relationship_line else "")
+        + "Write ONE short first-person sentence reflecting on how things have been going for you, "
+        "mentioning the specific other agent above by id if one is given. "
         "No preamble, no quotes, just the sentence."
     )
 

@@ -113,6 +113,55 @@ pub fn run_tick(
         intents.insert(agents[idx].id.clone(), intent);
     }
 
+    // Phase 5: relationship attribution for this tick's GATHER intents -
+    // done here, before anything resolves, since a GATHER actor's location
+    // this tick is already fixed (only MOVE changes location) regardless of
+    // phase-resolution order below.
+    let mut gather_by_node: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, agent) in agents.iter().enumerate() {
+        if agent.alive {
+            if let Some(intent) = intents.get(&agent.id) {
+                if intent.action == "GATHER" {
+                    gather_by_node.entry(agent.location.clone()).or_default().push(idx);
+                }
+            }
+        }
+    }
+    for (node_id, idxs) in &gather_by_node {
+        // Contested-node: every pair of agents gathering at the same node
+        // this tick, recorded against each other - the specific-agent
+        // attribution the congestion penalty (decide.rs::congestion_factor)
+        // already scores in aggregate but never named.
+        for a in 0..idxs.len() {
+            for b in (a + 1)..idxs.len() {
+                let (ia, ib) = (idxs[a], idxs[b]);
+                let id_a = agents[ia].id.clone();
+                let id_b = agents[ib].id.clone();
+                agents[ia].record_contested_node(&id_b, tick);
+                agents[ib].record_contested_node(&id_a, tick);
+            }
+        }
+        // Order-followed: credit whichever lead/hatch posted the active
+        // order:<resource> signal this node is currently honoring - the
+        // actual feedback channel. Crowd already reads a signal's *kind*
+        // (decide.rs::order_multiplier) but never its posted_by; this is
+        // the first place that identity gets used for anything.
+        let node = &world.nodes[node_id];
+        for &idx in idxs {
+            if let Some(intent) = intents.get(&agents[idx].id) {
+                if let Some(resource) = &intent.resource {
+                    let kind = format!("order:{resource}");
+                    if let Some(signal) = node.signals.iter().find(|s| s.kind == kind) {
+                        let poster = signal.posted_by.clone();
+                        if poster != agents[idx].id {
+                            agents[idx].record_order_followed(&poster, tick);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 4. resolve in fixed phase order, each phase in shuffled agent order
     for phase in ["MOVE", "GATHER", "CRAFT", "CONSUME"] {
         let mut actors: Vec<usize> = (0..agents.len())
@@ -177,4 +226,67 @@ pub fn run_tick(
     }
 
     (entries, decision_debug)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{Node, ResourceType, Signal};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    /// Phase 5 proof: a crowd agent gathering at a node under an active
+    /// order:<resource> signal must credit that specific relationship back
+    /// to whoever posted it - the actual feedback channel (LOG.md,
+    /// 2026-07-20), not just a mechanic that exists in the abstract.
+    /// Single isolated node (no neighbors, no other agents) so GATHER is the
+    /// only real candidate other than REST/an ambient rich: signal - removes
+    /// any doubt about which action the agent will actually choose.
+    #[test]
+    fn gather_under_an_active_order_credits_the_poster() {
+        let mut world = World::new();
+        world.add_node(Node {
+            id: "n0".into(),
+            resource_type: Some(ResourceType::Wood),
+            quantity: 10.0,
+            max_quantity: 10.0,
+            regen_rate: 0.0,
+            signals: vec![Signal { kind: "order:wood".into(), node_id: "n0".into(), posted_by: "lead0".into(), tick: 0 }],
+        });
+        let agent = AgentState::new("a0".to_string(), "n0".to_string(), 50.0, 90.0, ResourceType::Wood);
+        let mut agents = vec![agent];
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+
+        let (entries, _) = run_tick(1, &mut world, &mut agents, &mut rng, true, &HashMap::new(), true, 1.6);
+
+        let gathered = entries.iter().any(|e| e.agent_id == "a0" && e.action == "GATHER" && e.success);
+        assert!(gathered, "expected a0's only real candidate (GATHER at its own specialty node) to win and succeed");
+
+        let rec = agents[0].relationships.get("lead0");
+        assert!(rec.is_some(), "expected a0 to have recorded a relationship with lead0 after gathering under its order");
+        assert_eq!(rec.unwrap().orders_followed, 1);
+    }
+
+    /// Same setup but no order signal present - the negative control. Makes
+    /// sure the credit is conditional on a real active order, not fired
+    /// unconditionally whenever a GATHER happens to succeed.
+    #[test]
+    fn gather_with_no_order_signal_credits_nobody() {
+        let mut world = World::new();
+        world.add_node(Node {
+            id: "n0".into(),
+            resource_type: Some(ResourceType::Wood),
+            quantity: 10.0,
+            max_quantity: 10.0,
+            regen_rate: 0.0,
+            signals: vec![],
+        });
+        let agent = AgentState::new("a0".to_string(), "n0".to_string(), 50.0, 90.0, ResourceType::Wood);
+        let mut agents = vec![agent];
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+
+        run_tick(1, &mut world, &mut agents, &mut rng, true, &HashMap::new(), true, 1.6);
+
+        assert!(agents[0].relationships.is_empty(), "no order signal existed, so nothing should have been credited");
+    }
 }

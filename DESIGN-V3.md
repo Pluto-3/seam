@@ -321,9 +321,23 @@ ones are proven worth continuing.
   finding 0 qualifying deaths; the mechanism is real but this event type
   is evidently rare at this scale, not proven wrong, just unobserved yet.
 
+## Phase 5 — Relationships / memory-of-others (core built + verified 2026-07-20; see LOG.md)
+
+**Decision, not yet built.** External research (`LOG.md`, 2026-07-20 entry) surfaced the actual gap behind the Watchable World ambition: Project Sid's most-cited emergent moment (two agents forming a relationship, turning on their own town's leadership) came from agents holding real memory of *each other*, not richer stats about themselves. Seam doesn't have that today — leads reason from their own two-layer memory in isolation, crowd agents carry no memory of other agents at all, and standing orders are one-directional (leads/hatch issue them, nobody signals back). This phase closes that gap for real, not as a bolt-on:
+
+- **Per-agent relationship state** — at minimum leads and hatches (crowd stays cheap/mechanical per the project's standing reuse posture, same tier discipline as every phase before this), tracking real history with specific other agents: trade partners and outcomes, rivalry/contention at shared nodes, anything Phase 3's cross-society highlight extraction already detects as noteworthy.
+- **A feedback channel, not just top-down orders** — the hierarchical-team literature (`LOG.md`) found lead-style agents issue the large majority of a team's one-way communication; this phase adds the other direction, crowd/lower agents signaling something back upward that a lead's own decisions or memory summary can actually use.
+- **Narrative and highlights read relationship state, not just raw events** — the eventual payoff: a scene or highlight can reference an actual standing relationship ("lead0's third dispute with lead2 over n13") instead of only a single tick's isolated event.
+
+Concordia's Entity-Component pattern (`LOG.md`) is worth a skim before committing to a concrete data shape for relationship state — not to adopt Concordia wholesale, but cheap insurance against re-deriving a structure it already iterated on.
+
+**Built and verified 2026-07-20 (LOG.md has the full account)**: `relationships: HashMap<String, RelationshipRecord>` on every `AgentState`, populated at trade resolution, node-contention, and standing-order attribution (via `Signal.posted_by`, previously unused); a mechanical `top_relationships(n)` feeds both the viewer (`public_view()`) and `sidecar.py`'s memory prompt. Verified with two Rust unit tests (positive + negative control) and a live Ollama run where a lead's `memory_summary` correctly referenced its real top relationship by id. Deliberately not yet built: a crowd-wide aggregate ("how many distinct agents follow lead0's orders") — the per-agent data this needs now exists, computing the aggregate itself is a straightforward follow-up, not done this session.
+
 ## Research thread — Asymmetric-power campaign (run + resolved 2026-07-20; see LOG.md)
 
 **Result**: mixed, honest, not the clean SOVSIM story. Trade activity declines close to monotonically as `order_strength` increases (mean ~19.1k trades at symmetric down to ~15.0k at strong asymmetry, ~21.5% drop across 15 seeds x 5 levels) - the SOVSIM-consistent finding. Population/survival mostly does not degrade with asymmetry (14/15 seeds show zero deaths at any level) - one seed has a sharp collapse threshold between levels 2.0 and 2.5 specifically, a second shows a milder non-monotonic effect - population collapse under asymmetry is real but rare and seed-specific here, not a general effect. Full numbers and the two exception seeds are in `LOG.md`'s 2026-07-20 entry; raw per-run results in `core-rs/logs/asymmetric_power_campaign_2026-07-20.csv`.
+
+
 
 **Decision, not yet run.** A 2026 paper (SOVSIM, `LOG.md`) found that introducing one asymmetric-power agent into an otherwise-symmetric population caused up to 87% degradation in cooperation/survival across eleven models. Seam's lead/hatch-over-crowd design is structurally the same shape. This is locked as a dedicated, rigorous experiment — not a quick check of existing logs, since the raw per-decision data from July's long runs was deleted in the disk near-miss:
 
