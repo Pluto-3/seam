@@ -46,6 +46,11 @@ struct Args {
     // long unattended run without this has no way to reconstruct when
     // each society actually declined, only a before/after snapshot.
     society_stats_csv: Option<String>,
+    // Viewer Wave 2 / Workstream B: how strongly a lead/hatch's standing
+    // order biases nearby crowd gathering - was a headless-only experiment
+    // flag (run's main.rs) until now; mirrors that flag exactly so a live
+    // world can actually be watched running under a chosen power level.
+    order_strength: f64,
 }
 
 fn parse_args() -> Args {
@@ -67,6 +72,7 @@ fn parse_args() -> Args {
         // needed yet.
         societies: 3,
         society_stats_csv: None,
+        order_strength: ORDER_GATHER_MULTIPLIER,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -128,6 +134,10 @@ fn parse_args() -> Args {
                 a.society_stats_csv = Some(argv[i + 1].clone());
                 i += 2;
             }
+            "--order-strength" => {
+                a.order_strength = argv[i + 1].parse().expect("--order-strength must be a float");
+                i += 2;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -166,6 +176,15 @@ struct Snapshot {
     // now - a node is contested exactly when societies.len() > 1. Only
     // nodes with 1+ living agents are included, keeping this small.
     node_occupancy: Vec<serde_json::Value>,
+    // Viewer Wave 2: the scarce:/rich:/order: signal mechanic (decide.rs)
+    // has never had a live representation - node.signals is dynamic,
+    // per-tick state that only ever lived server-side. Only nodes with 1+
+    // currently-active (already-pruned-of-expired) signal are included.
+    active_signals: Vec<serde_json::Value>,
+    // Viewer Wave 2: how much power leads/hatch currently hold over crowd
+    // gathering - was previously invisible even to someone watching the
+    // live world, since it only existed as a headless-experiment CLI flag.
+    order_strength: f64,
 }
 
 const SETTLEMENT_ROSTER_SIZE: usize = 8;
@@ -204,6 +223,10 @@ struct SimState {
     tick: i64,
     stats: StatsTracker,
     trade_enabled: bool,
+    // Viewer Wave 2 / Workstream B: runtime-tunable lead/hatch order strength,
+    // stored here (not just read from Args once) so build_snapshot can
+    // report it every tick, the same way trade_enabled already does.
+    order_strength: f64,
     // v3 Phase 0: N independent societies on the same shared world, each
     // with its own home node, roster, and hatch - replaces the single
     // settlement_node/settlement_roster fields from v2 Phase 3.
@@ -386,6 +409,26 @@ fn build_node_occupancy(sim: &SimState) -> Vec<serde_json::Value> {
     }).collect()
 }
 
+/// Viewer Wave 2: same shape as build_node_occupancy above, but for the
+/// scarce:/rich:/order: signal mechanic instead of agent presence. Each
+/// node's `signals` is already the live, already-pruned-of-expired-entries
+/// set (World::prune_signals runs every tick, tick.rs step 1) - this just
+/// serializes whatever's already there, no new expiry logic needed.
+fn build_active_signals(sim: &SimState) -> Vec<serde_json::Value> {
+    sim.world.node_order.iter()
+        .filter_map(|id| {
+            let node = &sim.world.nodes[id];
+            if node.signals.is_empty() {
+                return None;
+            }
+            let signals: Vec<serde_json::Value> = node.signals.iter().map(|s| {
+                serde_json::json!({ "kind": s.kind, "posted_by": s.posted_by })
+            }).collect();
+            Some(serde_json::json!({ "node": id, "signals": signals }))
+        })
+        .collect()
+}
+
 fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
     let alive: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive).collect();
     let population = alive.len();
@@ -410,6 +453,8 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         events: sim.notable_events.iter().cloned().collect(),
         highlights: sim.highlights.iter().cloned().collect(),
         node_occupancy: build_node_occupancy(sim),
+        active_signals: build_active_signals(sim),
+        order_strength: sim.order_strength,
     }
 }
 
@@ -516,6 +561,7 @@ async fn main() {
         tick: 0,
         stats: StatsTracker::new(a.stats_csv.as_deref()),
         trade_enabled: !a.no_trade,
+        order_strength: a.order_strength,
         societies,
         possessed_society,
         pending_intents: HashMap::new(),
@@ -567,10 +613,11 @@ async fn main() {
                     let sim: &mut SimState = &mut guard;
                     sim.tick += 1;
                     let trade_enabled = sim.trade_enabled;
+                    let order_strength = sim.order_strength;
                     let tick = sim.tick;
                     let due_intents = std::mem::take(&mut sim.pending_intents);
                     let (entries, decision_debug) =
-                        run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true, ORDER_GATHER_MULTIPLIER);
+                        run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true, order_strength);
                     sim.stats.consume(&entries);
 
                     // Deaths and standing orders were previously invisible in the
@@ -935,7 +982,7 @@ async fn get_lead_candidates(
     let lead = sim.agents.iter().find(|a| a.id == id && a.tier == "lead").ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == lead.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
-    let candidates = generate_candidates(lead, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, ORDER_GATHER_MULTIPLIER);
+    let candidates = generate_candidates(lead, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, sim.order_strength);
 
     let out: Vec<serde_json::Value> = candidates
         .iter()
@@ -997,7 +1044,7 @@ async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Jso
     let hatch = sim.agents.iter().find(|a| a.id == hatch_id).ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == hatch.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
-    let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, ORDER_GATHER_MULTIPLIER);
+    let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, sim.order_strength);
 
     let out: Vec<serde_json::Value> = candidates
         .iter()

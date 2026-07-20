@@ -117,6 +117,13 @@
   .caution-bar { width: 60px; height: 4px; background: #232a35; border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 0.4rem; }
   .caution-bar-fill { height: 100%; background: var(--vitality); }
 
+  /* ---------- relationships (Phase 5 data, not just the memory quote) ---------- */
+  .relationships { margin-top: 0.5rem; font-size: 0.76rem; color: var(--text-faint); }
+  .relationship-row { padding: 0.1rem 0; }
+  .relationship-row b { color: var(--text-muted); font-weight: 600; }
+  .relationship-row .balance-pos { color: #6ee7a8; }
+  .relationship-row .balance-neg { color: var(--vitality); }
+
   /* ---------- crowd ---------- */
   .crowd-panel { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: center; }
   .specialty-bars { display: flex; flex-direction: column; gap: 0.4rem; min-width: 220px; }
@@ -153,6 +160,7 @@
       <span>population <b id="population">–</b></span>
       <span>trades <b id="trades">–</b></span>
       <span>specialization <b id="specIdx">–</b></span>
+      <span>order power <b id="orderStrength">–</b></span>
     </div>
   </div>
   <div class="vitals">
@@ -179,6 +187,8 @@
     <span><span class="map-dot" style="background:#c1685a"></span>contested node</span>
     <span><span class="map-dot" style="background:#7c8695"></span>society home node (ring color = that society)</span>
     <span><span class="map-dot" style="background:#fff"></span>your hatch</span>
+    <span style="color:#f4d35e">▲ active standing order</span>
+    <span style="color:#e07be0">● scarce/rich signal</span>
   </div>
 </div>
 
@@ -192,6 +202,7 @@
     <div class="panel">
       <div class="kv" id="hatchMeta"></div>
       <div class="hatch-inventory" id="hatchInventory"></div>
+      <div id="hatchRelationships"></div>
       <div class="hatch-actions" id="hatchActions"></div>
       <div id="actionFeedback"></div>
     </div>
@@ -223,15 +234,26 @@
 <div id="log"></div>
 
 <script>
-  let ws = null;
   const statusEl = document.getElementById("status");
   const statusDot = document.getElementById("statusDot");
   const logEl = document.getElementById("log");
 
   const HISTORY_CAP = 300;
-  const history = []; // { tick, population, avg_hunger, specialization_index }
-  let settlementHistory = []; // { tick, population_alive, avg_hunger } - for whichever society is currently focused
-  let focusedSocietyId = null; // tracked so a possession switch can reset settlementHistory instead of splicing two societies' numbers into one line
+
+  // Single source of truth for everything the render loop reads/mutates
+  // across calls - consolidated from seven scattered globals (that pattern
+  // already caused a real bug once: the settlementHistory-reset-on-focus-
+  // change logic below exists specifically to patch over it) into one
+  // object, so every mutation site is visible in one place.
+  const viewerState = {
+    ws: null,
+    history: [], // { tick, population, avg_hunger, specialization_index }
+    settlementHistory: [], // { tick, population_alive, avg_hunger } - for whichever society is currently focused
+    focusedSocietyId: null, // tracked so a possession switch can reset settlementHistory instead of splicing two societies' numbers into one line
+    worldNodes: [],
+    worldEdges: [],
+    nodePositions: {}, // node id -> {x, y} in [-1, 1] space
+  };
 
   function setStatus(connected) {
     statusEl.textContent = connected ? "connected" : "disconnected";
@@ -274,11 +296,11 @@
 
   function renderVitals() {
     const svg = document.getElementById("vitalsSvg");
-    if (history.length < 2) { svg.innerHTML = ""; return; }
+    if (viewerState.history.length < 2) { svg.innerHTML = ""; return; }
     const w = 300, h = 46;
-    const pop = history.map((r) => r.population);
-    const hunger = history.map((r) => r.avg_hunger);
-    const spec = history.map((r) => r.specialization_index);
+    const pop = viewerState.history.map((r) => r.population);
+    const hunger = viewerState.history.map((r) => r.avg_hunger);
+    const spec = viewerState.history.map((r) => r.specialization_index);
     const popLine = polylinePoints(pop, w, h, 0, Math.max(...pop, 1));
     const hungerLine = polylinePoints(hunger, w, h, 0, 100);
     const specLine = polylinePoints(spec, w, h, 0, 1);
@@ -290,9 +312,9 @@
   }
 
   function renderSettlementSparkline(container) {
-    if (settlementHistory.length < 2) { container.innerHTML = ""; return; }
+    if (viewerState.settlementHistory.length < 2) { container.innerHTML = ""; return; }
     const w = 100, h = 34;
-    const pop = settlementHistory.map((r) => r.population_alive);
+    const pop = viewerState.settlementHistory.map((r) => r.population_alive);
     const maxPop = Math.max(...pop, 1);
     const line = polylinePoints(pop, w, h, 0, maxPop);
     container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${line}" fill="none" stroke="#6ee7a8" stroke-width="1.6" /></svg>`;
@@ -302,9 +324,6 @@
   // v1's layout.py picked a plain circular layout on purpose over a
   // force-directed one - "worth it later only if a circle turns out to
   // look bad, not before." Same judgment call still applies; ported as-is.
-  let worldNodes = [];
-  let worldEdges = [];
-  let nodePositions = {}; // node id -> {x, y} in [-1, 1] space
   // Wider than tall (matches the panel's real aspect ratio better than a
   // square did) - the layout algorithm itself is unchanged, only the
   // screen remap below stretches horizontally.
@@ -315,11 +334,11 @@
   const SOCIETY_COLORS = ["#8fd3ff", "#d9a860", "#c98fdb", "#6ee7a8"];
 
   function computeLayout() {
-    const n = worldNodes.length;
-    nodePositions = {};
-    worldNodes.forEach((node, i) => {
+    const n = viewerState.worldNodes.length;
+    viewerState.nodePositions = {};
+    viewerState.worldNodes.forEach((node, i) => {
       const angle = (2 * Math.PI * i) / n;
-      nodePositions[node.id] = { x: Math.cos(angle), y: Math.sin(angle) };
+      viewerState.nodePositions[node.id] = { x: Math.cos(angle), y: Math.sin(angle) };
     });
   }
 
@@ -339,8 +358,8 @@
       const resp = await fetch("/world");
       if (!resp.ok) return;
       const data = await resp.json();
-      worldNodes = data.nodes;
-      worldEdges = data.edges;
+      viewerState.worldNodes = data.nodes;
+      viewerState.worldEdges = data.edges;
       computeLayout();
     } catch (e) {
       // leave the map empty - topology is static, so a failed one-time
@@ -355,21 +374,30 @@
 
   function renderMap(snap) {
     const svg = document.getElementById("mapSvg");
-    if (worldNodes.length === 0) return;
+    if (viewerState.worldNodes.length === 0) return;
     const societies = snap.societies || [];
     const occByNode = {};
     for (const o of snap.node_occupancy || []) occByNode[o.node] = o;
     const homeNodeOf = {};
     for (const s of societies) homeNodeOf[s.node] = s;
+    // Viewer Wave 2: the scarce:/rich:/order: signal mechanic (decide.rs) -
+    // never had a visual footprint before, even though it's a first-class,
+    // verified mechanic (this session's asymmetric-power campaign). A node
+    // can carry more than one signal; order: (a real directive from a
+    // specific lead/hatch) is the more actionable fact, so it takes the
+    // marker if present, same priority pattern already used for contested
+    // vs. home-node rings above.
+    const signalsByNode = {};
+    for (const s of snap.active_signals || []) signalsByNode[s.node] = s.signals;
 
     const parts = [];
-    for (const e of worldEdges) {
-      const p1 = toScreen(nodePositions[e.a]);
-      const p2 = toScreen(nodePositions[e.b]);
+    for (const e of viewerState.worldEdges) {
+      const p1 = toScreen(viewerState.nodePositions[e.a]);
+      const p2 = toScreen(viewerState.nodePositions[e.b]);
       parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="#232a35" stroke-width="1" />`);
     }
-    for (const node of worldNodes) {
-      const pos = nodePositions[node.id];
+    for (const node of viewerState.worldNodes) {
+      const pos = viewerState.nodePositions[node.id];
       if (!pos) continue;
       const p = toScreen(pos);
       const occ = occByNode[node.id];
@@ -388,17 +416,62 @@
       if (occ && occ.total > 0) {
         parts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y - 8).toFixed(1)}" font-size="6" text-anchor="middle" fill="#7c8695">${occ.total}</text>`);
       }
+      const signals = signalsByNode[node.id];
+      if (signals && signals.length > 0) {
+        const order = signals.find((s) => s.kind.startsWith("order:"));
+        const glyph = order ? "▲" : "●";
+        const color = order ? "#f4d35e" : "#e07be0";
+        const label = order ? `${escapeHtml(order.kind)} by ${escapeHtml(order.posted_by)}` : signals.map((s) => escapeHtml(s.kind)).join(", ");
+        parts.push(`<text x="${(p.x + 7).toFixed(1)}" y="${(p.y + 9).toFixed(1)}" font-size="7" fill="${color}"><title>${label}</title>${glyph}</text>`);
+      }
     }
     const focused = societies.find((s) => s.id === snap.possessed_society);
-    if (focused && focused.hatch && focused.hatch.alive && nodePositions[focused.hatch.location]) {
-      const p = toScreen(nodePositions[focused.hatch.location]);
+    if (focused && focused.hatch && focused.hatch.alive && viewerState.nodePositions[focused.hatch.location]) {
+      const p = toScreen(viewerState.nodePositions[focused.hatch.location]);
       parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#fff" stroke="#6ee7a8" stroke-width="1.5" />`);
     }
     svg.innerHTML = parts.join("");
   }
 
   // ---------- panel renderers ----------
-  function renderLeads(leads) {
+
+  // Phase 5: resolves a raw other-agent id (all top_relationships carries)
+  // into a display name - checked across leads, every society's hatch, and
+  // every society's roster, since a relationship partner could be any tier.
+  // Falls back to the raw id if genuinely not found anywhere in this snapshot.
+  function buildAgentNameIndex(snap) {
+    const index = {};
+    for (const l of snap.leads || []) index[l.id] = l.display_name || l.id;
+    for (const s of snap.societies || []) {
+      if (s.hatch) index[s.hatch.id] = s.hatch.display_name || s.hatch.id;
+      for (const r of s.roster || []) index[r.id] = r.display_name || r.id;
+    }
+    return index;
+  }
+
+  // Phase 5: the actual structured data behind a lead/hatch's memory_summary
+  // quote - shown side by side with it rather than only trusting the AI's
+  // prose, since the model has already been caught once fumbling a number
+  // (said "five", the real count was ten) while still naming the right
+  // partner. Mechanical data only, no LLM involved in this render.
+  function renderRelationships(rels, nameIndex) {
+    if (!rels || rels.length === 0) return "";
+    const rows = rels.map((r) => {
+      const otherName = escapeHtml(nameIndex[r.other_id] || r.other_id);
+      const parts = [];
+      if (r.trades > 0) {
+        const balanceClass = r.trade_balance >= 0 ? "balance-pos" : "balance-neg";
+        const sign = r.trade_balance >= 0 ? "+" : "";
+        parts.push(`${r.trades} trade${r.trades === 1 ? "" : "s"} (<span class="${balanceClass}">${sign}${r.trade_balance.toFixed(1)}</span>)`);
+      }
+      if (r.contested_node_count > 0) parts.push(`${r.contested_node_count} contested`);
+      if (r.orders_followed > 0) parts.push(`${r.orders_followed} order${r.orders_followed === 1 ? "" : "s"} followed`);
+      return `<div class="relationship-row"><b>${otherName}</b> — ${parts.join(", ")}</div>`;
+    });
+    return `<div class="relationships">${rows.join("")}</div>`;
+  }
+
+  function renderLeads(leads, nameIndex) {
     const container = document.getElementById("leads");
     container.innerHTML = (leads || []).map((l) => {
       const name = l.display_name || l.id;
@@ -414,6 +487,7 @@
           <span>hunger scares ${l.hunger_scares_witnessed}</span>
           <span>caution<span class="caution-bar"><span class="caution-bar-fill" style="width:${Math.min(100, biasPct)}%"></span></span></span>
         </div>
+        ${renderRelationships(l.top_relationships, nameIndex)}
       </div>`;
     }).join("");
   }
@@ -465,7 +539,7 @@
     renderSettlementSparkline(document.getElementById("settlementSpark"));
   }
 
-  function renderHatchMeta(h) {
+  function renderHatchMeta(h, nameIndex) {
     const metaEl = document.getElementById("hatchMeta");
     const invEl = document.getElementById("hatchInventory");
     if (!h) { metaEl.innerHTML = "<dt>status</dt><dd>no hatch found</dd>"; invEl.textContent = ""; return; }
@@ -481,6 +555,7 @@
     const inv = h.inventory || {};
     const parts = Object.entries(inv).filter(([, v]) => v > 0.01).map(([k, v]) => `${v.toFixed(1)} ${k}`);
     invEl.textContent = parts.length ? `holding: ${parts.join(", ")}` : "holding: nothing";
+    document.getElementById("hatchRelationships").innerHTML = renderRelationships(h.top_relationships, nameIndex);
   }
 
   function renderNarrative(scenes) {
@@ -585,9 +660,10 @@
     document.getElementById("population").textContent = `${snap.population} / ${snap.total}`;
     document.getElementById("trades").textContent = snap.trades_cumulative;
     document.getElementById("specIdx").textContent = snap.specialization_index.toFixed(3);
+    document.getElementById("orderStrength").textContent = snap.order_strength.toFixed(2);
 
-    history.push({ tick: snap.tick, population: snap.population, avg_hunger: snap.avg_hunger, specialization_index: snap.specialization_index });
-    if (history.length > HISTORY_CAP) history.shift();
+    viewerState.history.push({ tick: snap.tick, population: snap.population, avg_hunger: snap.avg_hunger, specialization_index: snap.specialization_index });
+    if (viewerState.history.length > HISTORY_CAP) viewerState.history.shift();
     renderVitals();
 
     const societies = snap.societies || [];
@@ -596,13 +672,13 @@
     // Switching societies shouldn't splice two different societies' numbers
     // into one misleading line - reset the rolling history the moment the
     // focused society actually changes, not just refuse to update it.
-    if (focused && focused.id !== focusedSocietyId) {
-      focusedSocietyId = focused.id;
-      settlementHistory = [];
+    if (focused && focused.id !== viewerState.focusedSocietyId) {
+      viewerState.focusedSocietyId = focused.id;
+      viewerState.settlementHistory = [];
     }
     if (focused) {
-      settlementHistory.push({ tick: snap.tick, population_alive: focused.population_alive, avg_hunger: focused.avg_hunger });
-      if (settlementHistory.length > HISTORY_CAP) settlementHistory.shift();
+      viewerState.settlementHistory.push({ tick: snap.tick, population_alive: focused.population_alive, avg_hunger: focused.avg_hunger });
+      if (viewerState.settlementHistory.length > HISTORY_CAP) viewerState.settlementHistory.shift();
     }
 
     renderSocieties(societies, snap.possessed_society);
@@ -610,8 +686,9 @@
     document.getElementById("hatchLabel").textContent = focused ? `the hatch (you, ${focused.id})` : "the hatch (you)";
     document.getElementById("leadsLabel").textContent = focused ? `the lead (${focused.id})` : "the lead";
     renderSettlement(focused);
-    renderHatchMeta(focused && focused.hatch);
-    renderLeads((snap.leads || []).filter((l) => focused && l.id === focused.lead_id));
+    const nameIndex = buildAgentNameIndex(snap);
+    renderHatchMeta(focused && focused.hatch, nameIndex);
+    renderLeads((snap.leads || []).filter((l) => focused && l.id === focused.lead_id), nameIndex);
     renderNarrative(snap.narrative);
     renderEvents(snap.events);
     renderHighlights(snap.highlights);
@@ -664,17 +741,17 @@
   }
 
   function connect() {
-    if (ws) return;
+    if (viewerState.ws) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
-    ws.onopen = () => setStatus(true);
-    ws.onclose = () => { setStatus(false); ws = null; };
-    ws.onerror = () => { setStatus(false); };
-    ws.onmessage = (ev) => render(JSON.parse(ev.data));
+    viewerState.ws = new WebSocket(`${proto}//${location.host}/ws`);
+    viewerState.ws.onopen = () => setStatus(true);
+    viewerState.ws.onclose = () => { setStatus(false); viewerState.ws = null; };
+    viewerState.ws.onerror = () => { setStatus(false); };
+    viewerState.ws.onmessage = (ev) => render(JSON.parse(ev.data));
   }
 
   function disconnect() {
-    if (ws) { ws.close(); ws = null; }
+    if (viewerState.ws) { viewerState.ws.close(); viewerState.ws = null; }
     setStatus(false);
   }
 

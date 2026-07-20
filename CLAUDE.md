@@ -25,6 +25,15 @@ Six real options surfaced after walking back through this session's build. Liste
 5. **Move `seam-swarm` from notes to a real build** — the multi-echelon command depth + propose-validate-execute pattern documented in that repo's `PIVOT-NOTES.md` were waiting on seam's own architecture maturing (real memory, a feedback channel) — that's now true.
 6. **Real rivalry/conflict mechanics** — relationships currently only record trade and contention, not actual antagonism. A genuine adversarial mechanic would connect both the Watchable World ambition and `seam-swarm`'s own open questions about opposing sides.
 
+## Viewer: full audit done, Waves 1-2 built (2026-07-20)
+
+A full read-through of `core-rs/viewer/index.html` (previously untouched all session) found it had no path to any of this session's new backend work. Full 6-wave/11-item proposal discussed; the "stay vanilla, no React yet" call was explicitly revisited and reconfirmed (nothing in the proposal structurally needs a framework — the file's real weak point is scattered global state, not rendering complexity). Waves 1-2 built and verified live via headless-Chrome DOM dump (full account in `LOG.md`'s 2026-07-20 viewer entry):
+
+- **Wave 1**: consolidated seven scattered globals into one `viewerState` object — pure refactor, no behavior change.
+- **Wave 2**: rendered `top_relationships` for real (leads/hatch, not just the AI's prose about it); surfaced active `scarce:`/`rich:`/`order:` signals on the map (new `Snapshot.active_signals`, `build_active_signals()` in `serve_main.rs`); wired `order_strength` into `serve` itself (was headless-only) and into the masthead.
+
+**Still open, not built this round** — Waves 3-6 from the original proposal: per-society specialization/rate sparklines; a relationship/trade network graph view; historical replay against the existing Postgres layer; WebSocket auto-reconnect, fixing the shared-single-possession problem, and an actual access boundary (all three worth doing before this is ever shown outside solo use); a headless-Chrome smoke-test script checked into the repo so future viewer changes get a repeatable regression check instead of one-off manual verification.
+
 ## Where things stood as of 2026-07-19 (n13 investigation — resolved, kept for history)
 
 **The n13 congestion-trap investigation that this file used to track is resolved.** Full account in `ANALYSIS.md`'s "Angle 6" section. Short version:
