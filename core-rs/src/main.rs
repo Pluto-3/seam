@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::env;
 
 use seam_core::agents::{spawn_agents, spawn_leads};
+use seam_core::constants::ORDER_GATHER_MULTIPLIER;
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
 use seam_core::tick::run_tick;
@@ -28,6 +29,7 @@ struct Args {
     quiet: bool,
     with_leads: bool,
     no_memory: bool,
+    order_strength: f64,
 }
 
 fn parse_args() -> Args {
@@ -44,6 +46,7 @@ fn parse_args() -> Args {
         quiet: false,
         with_leads: false,
         no_memory: false,
+        order_strength: ORDER_GATHER_MULTIPLIER,
     };
     let argv: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -97,6 +100,10 @@ fn parse_args() -> Args {
                 a.no_memory = true;
                 i += 1;
             }
+            "--order-strength" => {
+                a.order_strength = argv[i + 1].parse().expect("--order-strength must be a float");
+                i += 2;
+            }
             other => {
                 eprintln!("unknown arg: {other}");
                 i += 1;
@@ -129,7 +136,7 @@ fn selftest(a: &Args) -> i32 {
     let mut agents = spawn_agents(a.agents, &world, &mut rng);
     let trade_enabled = !a.no_trade;
     for t in 1..=50i64 {
-        run_tick(t, &mut world, &mut agents, &mut rng, trade_enabled, &HashMap::new(), true);
+        run_tick(t, &mut world, &mut agents, &mut rng, trade_enabled, &HashMap::new(), true, a.order_strength);
         for ag in &agents {
             if !(-1e-6..=100.0 + 1e-6).contains(&ag.energy) {
                 println!("FAIL: agent {} energy out of range at tick {t}: {}", ag.id, ag.energy);
@@ -182,12 +189,13 @@ fn main() {
 
     if !a.quiet {
         println!(
-            "seam-core (Rust) - agents={} nodes={} ticks={} seed={} trade={}",
+            "seam-core (Rust) - agents={} nodes={} ticks={} seed={} trade={} order_strength={}",
             a.agents,
             a.nodes,
             a.ticks,
             a.seed,
-            if a.no_trade { "OFF" } else { "on" }
+            if a.no_trade { "OFF" } else { "on" },
+            a.order_strength
         );
         println!();
     }
@@ -195,7 +203,7 @@ fn main() {
     let trade_enabled = !a.no_trade;
     for t in 1..=a.ticks {
         let (entries, decision_debug) =
-            run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled, &HashMap::new(), memory_enabled);
+            run_tick(t, &mut world, &mut agent_list, &mut rng, trade_enabled, &HashMap::new(), memory_enabled, a.order_strength);
         // Enrichment, not a TickLogEntry field: decision_debug only exists for
         // agents whose tick actually went through choose_action_with_debug
         // (not DEATH entries, not LLM-overridden lead ticks), so it's attached

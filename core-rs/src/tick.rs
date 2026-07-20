@@ -46,6 +46,7 @@ pub fn run_tick(
     trade_enabled: bool,
     external_intents: &HashMap<String, Intent>,
     memory_enabled: bool,
+    order_strength: f64,
 ) -> (Vec<TickLogEntry>, HashMap<String, DecisionDebug>) {
     let mut entries: Vec<TickLogEntry> = Vec::new();
 
@@ -104,7 +105,7 @@ pub fn run_tick(
             Some(ov) => ov.clone(),
             None => {
                 let (intent, debug) =
-                    choose_action_with_debug(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled);
+                    choose_action_with_debug(&agents[idx], world, &colocated, tick, rng, &node_occupancy, trade_enabled, order_strength);
                 decision_debug.insert(agents[idx].id.clone(), debug);
                 intent
             }

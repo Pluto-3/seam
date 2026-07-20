@@ -83,10 +83,18 @@ fn congestion_factor(node_id: &str, agent: &AgentState, node_occupancy: &HashMap
     1.0 / (1.0 + (count.max(0) as f64) * C::CONGESTION_WEIGHT)
 }
 
-fn order_multiplier(node: &Node, resource_type: ResourceType) -> f64 {
+// order_strength is a runtime-tunable stand-in for what used to be the fixed
+// C::ORDER_GATHER_MULTIPLIER constant - how much a lead/hatch's standing
+// order actually biases nearby crowd gathering. Exists so the asymmetric-
+// power campaign (DESIGN-V3.md's "Research thread") can vary how much power
+// leads/hatches hold over crowd decisions as an experiment variable instead
+// of a compile-time constant. Every call site still defaults to the same
+// C::ORDER_GATHER_MULTIPLIER value, so behavior is unchanged unless a caller
+// deliberately passes something else.
+fn order_multiplier(node: &Node, resource_type: ResourceType, order_strength: f64) -> f64 {
     let kind = format!("order:{}", resource_type.as_str());
     if node.signals.iter().any(|s| s.kind == kind) {
-        C::ORDER_GATHER_MULTIPLIER
+        order_strength
     } else {
         1.0
     }
@@ -185,7 +193,7 @@ fn can_signal(agent: &AgentState, node: &Node, kind: &str, tick: i64) -> bool {
     !node.signals.iter().any(|s| s.posted_by == agent.id && s.kind == kind && tick - s.tick < C::SIGNAL_COOLDOWN)
 }
 
-fn best_local_score(agent: &AgentState, node: &Node, node_occupancy: &HashMap<String, i32>) -> f64 {
+fn best_local_score(agent: &AgentState, node: &Node, node_occupancy: &HashMap<String, i32>, order_strength: f64) -> f64 {
     let rt = match node.resource_type {
         Some(r) => r,
         None => return 0.0,
@@ -196,7 +204,7 @@ fn best_local_score(agent: &AgentState, node: &Node, node_occupancy: &HashMap<St
     if agent.held(rt) >= C::MAX_USEFUL_HOLDING {
         return 0.0;
     }
-    let mult = gather_yield_multiplier(agent, rt) * order_multiplier(node, rt);
+    let mult = gather_yield_multiplier(agent, rt) * order_multiplier(node, rt, order_strength);
     let congestion = congestion_factor(&node.id, agent, node_occupancy);
     marginal_value(agent, rt) * mult * congestion
 }
@@ -229,6 +237,7 @@ pub fn generate_candidates(
     tick: i64,
     node_occupancy: &HashMap<String, i32>,
     trade_enabled: bool,
+    order_strength: f64,
 ) -> Vec<(f64, Intent)> {
     let mut candidates: Vec<(f64, Intent)> = Vec::new();
     let node = &world.nodes[&agent.location];
@@ -249,7 +258,7 @@ pub fn generate_candidates(
     // Gather
     if let Some(rt) = node.resource_type {
         if node.quantity > 0.0 && agent.held(rt) < C::MAX_USEFUL_HOLDING {
-            let mult = gather_yield_multiplier(agent, rt) * order_multiplier(node, rt);
+            let mult = gather_yield_multiplier(agent, rt) * order_multiplier(node, rt, order_strength);
             let congestion = congestion_factor(&node.id, agent, node_occupancy);
             let score = marginal_value(agent, rt) * mult * congestion;
             let mut intent = Intent::new("GATHER");
@@ -369,7 +378,7 @@ pub fn generate_candidates(
     for edge in world.neighbors(&agent.location) {
         let neighbor_id = edge.other(&agent.location);
         let neighbor = &world.nodes[&neighbor_id];
-        let local_best = best_local_score(agent, neighbor, node_occupancy);
+        let local_best = best_local_score(agent, neighbor, node_occupancy, order_strength);
         let bonus = signal_bonus(agent, neighbor);
         let mut score = local_best * C::MOVE_LOOKAHEAD_DISCOUNT.powf(edge.cost) + bonus;
         if let Some(ref hop) = food_bfs_hop {
@@ -393,8 +402,9 @@ pub fn choose_action(
     rng: &mut impl Rng,
     node_occupancy: &HashMap<String, i32>,
     trade_enabled: bool,
+    order_strength: f64,
 ) -> Intent {
-    choose_action_with_debug(agent, world, colocated, tick, rng, node_occupancy, trade_enabled).0
+    choose_action_with_debug(agent, world, colocated, tick, rng, node_occupancy, trade_enabled, order_strength).0
 }
 
 /// Decision-time diagnostics for the n13-style congestion-trap investigation
@@ -442,8 +452,9 @@ pub fn choose_action_with_debug(
     rng: &mut impl Rng,
     node_occupancy: &HashMap<String, i32>,
     trade_enabled: bool,
+    order_strength: f64,
 ) -> (Intent, DecisionDebug) {
-    let candidates = generate_candidates(agent, world, colocated, tick, node_occupancy, trade_enabled);
+    let candidates = generate_candidates(agent, world, colocated, tick, node_occupancy, trade_enabled, order_strength);
 
     let gather_score = candidates.iter().find(|(_, i)| i.action == "GATHER").map(|(s, _)| *s);
 

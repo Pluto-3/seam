@@ -321,6 +321,18 @@ ones are proven worth continuing.
   finding 0 qualifying deaths; the mechanism is real but this event type
   is evidently rare at this scale, not proven wrong, just unobserved yet.
 
+## Research thread — Asymmetric-power campaign (run + resolved 2026-07-20; see LOG.md)
+
+**Result**: mixed, honest, not the clean SOVSIM story. Trade activity declines close to monotonically as `order_strength` increases (mean ~19.1k trades at symmetric down to ~15.0k at strong asymmetry, ~21.5% drop across 15 seeds x 5 levels) - the SOVSIM-consistent finding. Population/survival mostly does not degrade with asymmetry (14/15 seeds show zero deaths at any level) - one seed has a sharp collapse threshold between levels 2.0 and 2.5 specifically, a second shows a milder non-monotonic effect - population collapse under asymmetry is real but rare and seed-specific here, not a general effect. Full numbers and the two exception seeds are in `LOG.md`'s 2026-07-20 entry; raw per-run results in `core-rs/logs/asymmetric_power_campaign_2026-07-20.csv`.
+
+**Decision, not yet run.** A 2026 paper (SOVSIM, `LOG.md`) found that introducing one asymmetric-power agent into an otherwise-symmetric population caused up to 87% degradation in cooperation/survival across eleven models. Seam's lead/hatch-over-crowd design is structurally the same shape. This is locked as a dedicated, rigorous experiment — not a quick check of existing logs, since the raw per-decision data from July's long runs was deleted in the disk near-miss:
+
+- Multiple asymmetry *levels* (not just a memory-on/off-style binary toggle) — needs a real tunable "how much power does a lead/hatch actually hold over nearby crowd decisions" parameter, which doesn't exist yet.
+- Multiple seeds per level, same statistical rigor as the original 20-seed trade-on/off proof and the Phase 2 memory on/off experiment.
+- The actual question: does seam's own stewardship result (tended settlement surviving 3.5x longer) hold *because* the design avoids the cooperation-collapse this paper describes, or is it quietly paying a cost elsewhere that hasn't been measured?
+
+This can run independently of Phase 5 and doesn't block it, but both are informed by the same research pass and are being planned together.
+
 ## Open questions
 
 None blocking Phase 0. Still genuinely open, deferred on purpose:

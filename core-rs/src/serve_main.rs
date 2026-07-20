@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use seam_core::agents::{spawn_leads_at, AgentState, LEAD_GOALS};
+use seam_core::constants::ORDER_GATHER_MULTIPLIER;
 use seam_core::decide::{generate_candidates, Intent};
 use seam_core::log::JsonlWriter;
 use seam_core::stats::StatsTracker;
@@ -569,7 +570,7 @@ async fn main() {
                     let tick = sim.tick;
                     let due_intents = std::mem::take(&mut sim.pending_intents);
                     let (entries, decision_debug) =
-                        run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true);
+                        run_tick(tick, &mut sim.world, &mut sim.agents, &mut sim.rng, trade_enabled, &due_intents, true, ORDER_GATHER_MULTIPLIER);
                     sim.stats.consume(&entries);
 
                     // Deaths and standing orders were previously invisible in the
@@ -934,7 +935,7 @@ async fn get_lead_candidates(
     let lead = sim.agents.iter().find(|a| a.id == id && a.tier == "lead").ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == lead.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
-    let candidates = generate_candidates(lead, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
+    let candidates = generate_candidates(lead, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, ORDER_GATHER_MULTIPLIER);
 
     let out: Vec<serde_json::Value> = candidates
         .iter()
@@ -996,7 +997,7 @@ async fn get_player_candidates(State(state): State<Arc<AppState>>) -> Result<Jso
     let hatch = sim.agents.iter().find(|a| a.id == hatch_id).ok_or(StatusCode::NOT_FOUND)?;
     let colocated: Vec<&AgentState> = sim.agents.iter().filter(|a| a.alive && a.location == hatch.location).collect();
     let node_occupancy = compute_node_occupancy(&sim.agents);
-    let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled);
+    let candidates = generate_candidates(hatch, &sim.world, &colocated, sim.tick, &node_occupancy, sim.trade_enabled, ORDER_GATHER_MULTIPLIER);
 
     let out: Vec<serde_json::Value> = candidates
         .iter()
