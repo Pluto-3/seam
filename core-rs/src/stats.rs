@@ -93,8 +93,14 @@ impl StatsTracker {
         self.trade_leg_count / 2
     }
 
-    pub fn specialization_index(&self, agents: &[AgentState]) -> f64 {
-        let alive: Vec<&AgentState> = agents.iter().filter(|a| a.alive).collect();
+    // Viewer Wave 3: generalized from &[AgentState] to any iterator of
+    // agent refs so it can be scoped to one society's roster
+    // (build_society_view's roster: Vec<&AgentState>, serve_main.rs) as well
+    // as the whole population - &Vec<AgentState> already satisfies this
+    // bound natively, so the existing whole-population call sites are
+    // unchanged.
+    pub fn specialization_index<'a>(&self, agents: impl IntoIterator<Item = &'a AgentState>) -> f64 {
+        let alive: Vec<&AgentState> = agents.into_iter().filter(|a| a.alive).collect();
         let mut fractions = Vec::new();
         for a in &alive {
             let total: f64 = RAW_RESOURCES.iter().map(|&r| a.held(r)).sum();

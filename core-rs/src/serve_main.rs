@@ -156,6 +156,11 @@ struct Snapshot {
     avg_hunger: f64,
     specialization_index: f64,
     trades_cumulative: u64,
+    // Viewer Wave 3: lets the viewer compute a real craft *rate* client-side
+    // (delta between consecutive snapshots) the same way it now does for
+    // trades - StatsTracker::cumulative_crafts was already public, just
+    // never reached the live view.
+    crafts_cumulative: u64,
     uptime_secs: u64,
     leads: Vec<serde_json::Value>,
     societies: Vec<serde_json::Value>,
@@ -367,6 +372,10 @@ fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
     let avg_energy = if population_alive > 0 { alive.iter().map(|a| a.energy).sum::<f64>() / population_alive as f64 } else { 0.0 };
     let avg_hunger = if population_alive > 0 { alive.iter().map(|a| a.hunger).sum::<f64>() / population_alive as f64 } else { 0.0 };
     let total_food_held: f64 = alive.iter().map(|a| a.held(ResourceType::Food)).sum();
+    // Viewer Wave 3: this society's own specialization trend, not just the
+    // single global number - reuses the same specialization_index the
+    // global snapshot already calls, just scoped to this roster.
+    let specialization_index = sim.stats.specialization_index(roster.iter().copied());
     let hatch = sim.agents.iter().find(|a| a.id == society.hatch_id).map(|a| a.public_view());
     // Viewer pass: resolved roster members ("who's actually here"), not just
     // a count - same cost as the population_alive/avg_energy computation
@@ -383,6 +392,7 @@ fn build_society_view(sim: &SimState, society: &Society) -> serde_json::Value {
         "avg_energy": avg_energy,
         "avg_hunger": avg_hunger,
         "total_food_held": total_food_held,
+        "specialization_index": specialization_index,
         "hatch": hatch,
         "lead_id": society.lead_id,
     })
@@ -445,6 +455,7 @@ fn build_snapshot(sim: &SimState, started_at: std::time::Instant) -> Snapshot {
         avg_hunger,
         specialization_index: sim.stats.specialization_index(&sim.agents),
         trades_cumulative: sim.stats.cumulative_trades(),
+        crafts_cumulative: sim.stats.cumulative_crafts,
         uptime_secs: started_at.elapsed().as_secs(),
         leads,
         societies,
