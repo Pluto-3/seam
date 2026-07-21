@@ -2,6 +2,10 @@
 
 Simulated multi-agent economy. v1/v2/v3 all shipped — see `DESIGN.md`, `DESIGN-V2.md`, `DESIGN-V3.md` for build history, `ANALYSIS.md` for the live data-analysis pass, and this session's memory (`project_seam.md` in the Claude memory store) for full narrative context. This file exists so the next session's open work is visible immediately, without having to go hunting for it in memory or old commits.
 
+## Nothing is running (as of 2026-07-21)
+
+The phone-access world (port 7878, launched 2026-07-20, `--agents 40 --nodes 15 --societies 3 --seed 42`) ran unattended overnight and was shut down clean this session - see `LOG.md`'s final 2026-07-20 entry for the full account. Final numbers: tick 170,993, 9h37m uptime, population steady at 46 the entire run (zero deaths), 1,196,300 cumulative trades. Disk held at 42GB free throughout (unchanged from launch) - the decision to skip `--full-log` for this run was confirmed safe over a genuinely long unattended stretch, not just a short test. Both `serve` and `sidecar.py` exited cleanly on a plain `kill`. `ollama serve` (predates this run, not owned by it) left running. No data analysis or export done on this run's accumulated data yet - that's open, not started.
+
 ## Where things stand (as of 2026-07-20)
 
 **Both decisions from this session's external research pass are now built and verified — see `DESIGN-V3.md`'s "Phase 5" and "Research thread" sections, and `LOG.md`'s 2026-07-20 entries for the full account.**
